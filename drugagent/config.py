@@ -156,7 +156,9 @@ class Defaults:
         "screen_time_budget_h": 2.0,
         "n_binder_designs": 2,
         "vhh_lib_size": 2000,
-        "vhh_screen_n": 100,
+        # R10/G7: 100 was too slow even parallel (full-VHH dock ~minutes
+        # each); 40 keeps --fast a true validation scale
+        "vhh_screen_n": 40,
         "vhh_de_novo_designs": 2,
         "md_ns": 5.0,
         "md_reps": 3,

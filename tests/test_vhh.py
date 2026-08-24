@@ -40,3 +40,44 @@ def test_model_one_vhh():
         assert r["ok"], r.get("error")
         assert r["plddt"] > 0
         assert (Path(d) / "vhh_0.pdb").exists()
+
+
+# ---------------------------------------------------------------- R10: G7
+
+def test_dock_vhh_candidates_parallel(tmp_path, monkeypatch):
+    """R10/G7: candidates are all docked, results carry docking fields,
+    PDBQT conversion is idempotent (second call reuses the file)."""
+    from drugagent.modules import vhh as vh
+    ok = [{"idx": i, "plddt": 90 - i} for i in range(8)]
+    for i in range(8):
+        (tmp_path / f"vhh_{i}.pdb").write_text(
+            "ATOM      1  N   UNK A   1    0.0  0.0  0.0  1.0  0.0\n"
+            "END\n")
+    calls = {"pdbqt": 0, "dock": 0}
+
+    def fake_to_pdbqt(pdb, out):
+        calls["pdbqt"] += 1
+        out.write_text("REMARK x\n" + "ATOM      1  C   UNK A   1 "
+                       "0.0 0.0 0.0 0.0 0.0\n" * 10 + "\n")
+        return out
+
+    def fake_dock_one(args):
+        calls["dock"] += 1
+        return {"ok": True, "score": -4.0 - (args[0] and 0)}
+
+    monkeypatch.setattr(vh, "to_pdbqt", fake_to_pdbqt, raising=False)
+    monkeypatch.setattr(vh, "dock_one", fake_dock_one)
+    out = vh.dock_vhh_candidates(ok, tmp_path, "rec.pdbqt",
+                           {"center": [0, 0, 0], "xsize": 12,
+                            "ysize": 12, "zsize": 12}, n_jobs=1)
+    assert len(out) == 8
+    assert calls["dock"] == 8
+    assert all(r.get("ok") for r in out)
+    # idempotency: pdbqt files exist -> no reconversion on second run
+    before = calls["pdbqt"]
+    vh.dock_vhh_candidates(ok, tmp_path, "rec.pdbqt",
+                           {"center": [0, 0, 0], "xsize": 12,
+                            "ysize": 12, "zsize": 12}, n_jobs=1)
+    assert calls["pdbqt"] == before
+    # empty input
+    assert vh.dock_vhh_candidates([], tmp_path, "r", {}) == []

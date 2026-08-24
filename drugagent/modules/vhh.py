@@ -16,6 +16,7 @@ from loguru import logger
 from ..config import DEFAULTS, LIBRARIES, TOOLS, resolve_defaults
 from ..llm import AgentBrain
 from ..utils import jsave, pmap, run_cmd
+from .screening import dock_one, os_cpu
 
 # --------------------------------------------------------------------------- #
 # synthetic VHH library
@@ -116,6 +117,37 @@ def model_vhh_one(args: tuple) -> dict:
 # --------------------------------------------------------------------------- #
 # track A: screening
 # --------------------------------------------------------------------------- #
+def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
+                        pocket, *, n_jobs: int = 8) -> list[dict]:
+    """R10/G7: parallel VHH -> PDBQT -> Vina docking.
+
+    Was a serial for-loop: with full-length VHHs (hundreds of rotatable
+    bonds) a single vina run takes minutes, so 100 candidates meant hours.
+    Now joblib-parallel; each worker gets os_cpu/n_jobs threads so total
+    core usage stays ~constant. Idempotent: an existing <idx>.pdbqt is
+    reused. Returns the candidate dicts updated with the docking result."""
+    from ..modules.target_prep import to_pdbqt
+    if not ok:
+        return []
+    n_jobs = max(1, min(n_jobs, len(ok), 16))
+    cpu = max(1, os_cpu() // n_jobs)
+
+    def _dock(r: dict) -> dict:
+        pdb = model_dir / f"vhh_{r['idx']}.pdb"
+        lig_pdbqt = model_dir / f"vhh_{r['idx']}.pdbqt"
+        if not lig_pdbqt.is_file():
+            to_pdbqt(pdb, lig_pdbqt)
+        # full VHH is a huge "ligand" (100s of rotatable bonds); scale
+        # exhaustiveness down or docking takes hours per candidate
+        n_atoms = sum(1 for l in open(lig_pdbqt) if l.startswith("ATOM"))
+        exh = 8 if n_atoms < 100 else 1
+        prefix = model_dir / f"vhh_{r['idx']}_dock"
+        d = dock_one((rec_pdbqt, str(lig_pdbqt), str(prefix), pocket, exh, cpu))
+        return dict(r, **d)
+
+    return pmap(_dock, ok, n_jobs=n_jobs)
+
+
 def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
     from ..modules.screening import dock_one
     prep = state["target_prep"]
@@ -145,22 +177,12 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
     ok = ok[: int(state.get("options", {}).get("vhh_screen_n", 100))]
     logger.info(f"VHH modeling: {len(results)} total, {len(ok)} pass pLDDT>70 and top-n")
 
-    # dock
-    docked = []
-    for r in ok:
-        pdb = model_dir / f"vhh_{r['idx']}.pdb"
-        # VHH -> pdbqt via obabel (needs a mol; obabel can convert pdb->pdbqt)
-        from ..modules.target_prep import to_pdbqt
-        prefix = model_dir / f"vhh_{r['idx']}_dock"
-        lig_pdbqt = to_pdbqt(pdb, model_dir / f"vhh_{r['idx']}.pdbqt")
-        # full VHH is a huge "ligand" (100s of rotatable bonds); scale
-        # exhaustiveness down or docking takes hours per candidate
-        n_atoms = sum(1 for l in open(lig_pdbqt) if l.startswith("ATOM"))
-        exh = 8 if n_atoms < 100 else 1
-        d = dock_one((rec_pdbqt, str(lig_pdbqt), str(prefix), pocket, exh, 4))
-        r.update(d)
-        if d["ok"]:
-            docked.append(r)
+    # dock (R10/G7: parallel — the serial loop made Module D a 3-hour
+    # bottleneck: a full VHH is a ~700-atom "ligand" and each vina call
+    # takes minutes even at exhaustiveness 1)
+    docked_all = dock_vhh_candidates(ok, model_dir, rec_pdbqt, pocket,
+                                     n_jobs=n_jobs)
+    docked = [r for r in docked_all if r.get("ok")]
     docked.sort(key=lambda r: r.get("score", 0))
     return {
         "track": "A_screening",
