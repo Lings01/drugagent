@@ -117,6 +117,8 @@ def test_resolve_defaults_none_values_ignored():
 
 def test_run_exposes_md_knobs():
     """R10/G5: the key MD knobs are user-facing CLI options."""
+    import os
+    os.environ["COLUMNS"] = "200"  # keep rich from eliding long option names
     res = runner.invoke(app, ["run", "--help"])
     assert res.exit_code == 0
     for opt in ("--md-salt", "--md-divalent", "--md-divalent-m",
@@ -125,8 +127,11 @@ def test_run_exposes_md_knobs():
 
 
 def test_run_exposes_vhh_knobs():
-    """R11: the VHH pLDDT gate and rigid/flex docking are user-facing."""
+    """R11: the VHH knobs are user-facing CLI options."""
+    import os
+    os.environ["COLUMNS"] = "200"
     res = runner.invoke(app, ["run", "--help"])
     assert res.exit_code == 0
     assert "--vhh-plddt-min" in res.output
     assert "--vhh-dock-flex" in res.output
+    assert "--vhh-dock-cdr-only" in res.output

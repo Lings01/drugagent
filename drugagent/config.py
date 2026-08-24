@@ -137,6 +137,13 @@ class Defaults:
     # (this vina build also runs single-core on big ligands). Set
     # vhh_dock_flex=true via options for a (much slower) flexible screen.
     vhh_dock_flex: bool = False
+    # R11/G10-v2: dock CDR/loop FRAGMENTS instead of the full VHH. Bench
+    # (scripts/bench_vhh_dock.py): full-VHH dock ~O(n^1.9) in atom count
+    # (773 atoms ~80-100 min; 200 atoms ~3.5 min) and the full-VHH score
+    # is clash-dominated (protein in a pocket-sized box). Fragments
+    # (pLDDT-low runs, 100-200 atoms) dock in ~3-5 min with interpretable
+    # scores; composite = best fragment. Fast mode default (below).
+    vhh_dock_cdr_only: bool = False
     # md
     md_ns: float = 100.0
     md_reps: int = 3
@@ -177,6 +184,10 @@ class Defaults:
         # giving the dock step a real sample.
         "vhh_screen_n": 80,
         "vhh_plddt_min": 35.0,
+        # R11/G10-v2: CDR-fragment docking in fast mode — the benchmark
+        # showed full-VHH docking is the cost driver (~80-100 min each,
+        # score clash-dominated); fragments are ~15-20x cheaper.
+        "vhh_dock_cdr_only": True,
         "vhh_de_novo_designs": 2,
         "md_ns": 5.0,
         "md_reps": 3,

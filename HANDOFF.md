@@ -5,7 +5,7 @@
 force）、G9 VHH 命中面加宽（pLDDT fast 35 / full 50，fast n=80）、G10 VHH
 默认刚性对接（TORSDOF 0）、R5 柔性工作流自动判据（apo issue + apo×高 RMSF
 建议）、status 命令增强、pdbbind 根因（镜像 404 注册制，软失败）。快速测试
-175/175 绿。r10_e2e（1HVI 全模块 --fast --auto --no-llm）跑完收尾验证。
+181/181 绿。r10_e2e（1HVI 全模块 --fast --auto --no-llm）跑完收尾验证。
 
 ## 关键路径
 - 项目根：`/home/data/lrs/drug/drugagent`（唯一可写持久盘；**/tmp 是 tmpfs
@@ -28,12 +28,18 @@ force）、G9 VHH 命中面加宽（pLDDT fast 35 / full 50，fast n=80）、G10
    >45 仅 1 条（CDR3 loop 无序拉低整体 pLDDT）。`vhh_plddt_min` 进 Defaults
    （fast 35 / full 50，options/CLI `--vhh-plddt-min` 可覆盖）；fast
    `vhh_screen_n` 40→80；修 screen_vhh 写死 "pLDDT>70" 的日志。
-3. **G10 VHH 刚性对接**：默认 `flex=False`（`vhh_dock_flex`/CLI
-   `--vhh-dock-flex` 开柔性）。坑：此 vina 构建**所有** ligand 都要
-   ROOT/ENDROOT 分子图（小分子也是），无图报 "Unknown or inappropriate
-   tag" → 刚性 = 图保留 + `TORSDOF 0`（`make_rigid_pdbqt()`）；PDBQT 缓存
-   按扭转数判 flex/rigid，模式不匹配自动重转。基准脚本
-   `scripts/bench_vhh_dock.py`（data/fixtures/bench_vhh_dock/bench.json）。
+3. **G10 VHH 刚性对接 + G10-v2 CDR 片段对接**：默认 `flex=False`
+   （`vhh_dock_flex`/CLI `--vhh-dock-flex` 开柔性）。坑：此 vina 构建
+   **所有** ligand 都要 ROOT/ENDROOT+TORSDOF 分子图（小分子也是），无图
+   报 "Unknown or inappropriate tag" → 刚性 = 图保留 + `TORSDOF 0`
+   （`make_rigid_pdbqt()`）；PDBQT 缓存按扭转数判 flex/rigid，模式不匹配
+   自动重转。**基准**（`scripts/bench_vhh_dock.py`）：成本 ~O(n^1.9) 于
+   原子数、扭转数无关（200 原子 TORSDOF 0 vs 20 = 3.4 vs 3.6 min）；全长
+   773 原子 flex 76 min / rigid 101 min 且最优分几乎相同（2.1e8，撞墙
+   主导）→ **G10-v2**：fast 默认 `vhh_dock_cdr_only`——`vhh_cdr_fragments()`
+   按残基 pLDDT<50 连续区切 1-3 片段（pad 2，≥4 残基，整结构低则回退
+   全长），分别对接，综合分=最佳片段分（`fragment_scores` 保留；实测
+   257 原子片段 6.25 min vs 全长 ~80-100 min，~15×）。
 4. **R5 自动判据**：`analyze_completeness` 对无配体/无金属结构加 info 级
    `apo_target` issue；`interpret_stability` 判据：apo（is_ligand=False，
    md_summary 从 state 注入）+ 平均 RMSF > 2.5 Å → 建议"短 MD 系综 + 柔性

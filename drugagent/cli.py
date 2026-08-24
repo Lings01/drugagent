@@ -151,6 +151,7 @@ def run(
     no_llm: bool = typer.Option(False, help="不用 LLM (确定性脚本模式)"),
     vhh_plddt_min: float = typer.Option(None, help="VHH pLDDT 门槛 (默认 fast 35 / full 50)"),
     vhh_dock_flex: bool = typer.Option(None, help="VHH 柔性对接 (默认刚性, R11/G10)"),
+    vhh_dock_cdr_only: bool = typer.Option(None, help="VHH CDR 片段对接 (fast 默认开, R11/G10-v2)"),
 ):
     """运行 agent (LLM 主循环驱动工具; --no-llm 退化为脚本模式)."""
     from .agent import (AgentLoop, Ctx, build_tools, goal_text,
@@ -198,6 +199,8 @@ def run(
         options["vhh_plddt_min"] = vhh_plddt_min
     if vhh_dock_flex is not None:
         options["vhh_dock_flex"] = vhh_dock_flex
+    if vhh_dock_cdr_only is not None:
+        options["vhh_dock_cdr_only"] = vhh_dock_cdr_only
 
     brain = None if no_llm else AgentBrain(project_dir=pdir)
     ctx = Ctx(pdir, brain, options, auto=auto, target=tinfo,

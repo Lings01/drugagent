@@ -14,7 +14,7 @@
 | A 靶点准备 | PDB 文件 / PDB ID / FASTA / 裸序列输入；完整性分析 + 结构坑预检（多 MODEL/altloc/缺失残基/金属/核酸/无序末端）；agent 判定；自动+手动修复 PDB；清洗；口袋检测；PDBQT 转换 | RCSB, obabel, ESMFold（仅序列输入） |
 | B 小分子筛选 | 大库（DTP/ChEMBL/PDBBind 或自定义 SDF）→ 标准化 → 理化/ML 预过滤 → Vina 并行对接 → GNINA 复打分 → agent 定命中标准（参考配体重对接做阳性对照）；**柔性靶点工作流（R2/R5：MD 构象系综 → 多构象选择 + 侧链 `--flex`，consensus 平均分）** | RDKit, Vina, GNINA |
 | C binder 设计 | RFdiffusion 从头设计 + ProteinMPNN 序列 + ESMFold 单体/复合物打分（界面 pLDDT） | RFdiffusion, ProteinMPNN, ESMFold |
-| D 纳米抗体 | 轨道A：VHH 库（data/libraries/vhh_library.fasta 或合成）→ ESMFold 建模 → pLDDT 过滤（R11/G9：fast 35 / full 50，可 `vhh_plddt_min` 覆盖）→ **刚性对接**（R11/G10：全长 VHH 当刚性配体，`vhh_dock_flex` 可开柔性）→ 并行筛选；轨道B：RFdiffusion scaffold-guided（1EWN）从头设计；综合评分 + agent 选择 | ESMFold, RFdiffusion, Vina |
+| D 纳米抗体 | 轨道A：VHH 库（data/libraries/vhh_library.fasta 或合成）→ ESMFold 建模 → pLDDT 过滤（R11/G9：fast 35 / full 50，可 `vhh_plddt_min` 覆盖）→ **刚性对接**（R11/G10；fast 默认 **CDR 片段对接**（R11/G10-v2：pLDDT 低值区切 1-3 片段，~15× 提速，`vhh_dock_cdr_only` 可关；`vhh_dock_flex` 可开柔性））→ 并行筛选；轨道B：RFdiffusion scaffold-guided（1EWN）从头设计；综合评分 + agent 选择 | ESMFold, RFdiffusion, Vina |
 | E MD 模拟 | 体系选择 → pdb2gmx + ACPYPE (GAFF2) → 溶胀/加离子/EM → **NVT→NPT 平衡段（R5，带位置约束；R8 改 C-rescale）+ 生产 MD 烧入段剔除** → N ns × R 副本（自平衡态分叉）→ **收敛判定 + 自动延长（R6：RMSD 平台 + 主导簇，未收敛自动续跑合并）** → RMSD/RMSF/Rg/聚类 + **柔性诊断（分链/自拟合 RMSD + DSSP 式二级结构 + 柔性区定位（连续高 RMSF 段→残基区间）+ 规则化柔性解读）** + **金属离子协调（R3）** + **核酸链原生参数化（R4）** + **辅因子/血红素自动参数化（R8：ACPYPE + 嵌入金属独立离子）** | GROMACS 2023.1, ACPYPE, MDAnalysis |
 
 ## 快速开始
@@ -96,7 +96,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 │   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
 ├── DESIGN.md                         # 2.0 架构设计
 ├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (174 快测 + 15 slow e2e)
+├── tests/                            # pytest 套件 (176 快测 + 15 slow e2e)
 └── logs/                             # 构建/运行日志
 ```
 
@@ -114,7 +114,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 ## 测试
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (174 用例)
+env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (176 用例)
 env/bin/python -m pytest tests/ -q                   # 含 slow（需 vina/GROMACS/RF 权重）
 env/bin/python -m pytest tests/test_mdsim.py -m slow -q \    --basetemp=$PWD/data/fixtures/_ptmp             # MD e2e 建议本地盘 basetemp
 ```
@@ -268,6 +268,12 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   `to_pdbqt(flex=True)` 已自动补齐（并修正 obabel 丢失的元素列）；PDBQT 缓存
   带 flex/rigid 一致性检查，模式不匹配自动重转。大配体自动降 exhaustiveness
   （<100 原子用 8，否则 1）。VHH 对接打分是"结合能力"的粗筛，不等于亲和力测定。
+  **R11/G10-v2：CDR 片段对接**（`vhh_dock_cdr_only`，fast 默认开）——基准
+  （`scripts/bench_vhh_dock.py`）显示对接成本 ~O(n^1.9) 于原子数（773 原子
+  ~80-100 min，257 原子 6.25 min），且全长 VHH 分数由"撞墙"罚分主导
+  （2.1e8 kcal/mol 量级）。故 fast 模式只对接 CDR/loop 片段：按残基 pLDDT<50
+  的连续区切 1-3 个片段（pad 2 残基），综合分取最佳片段分（`fragment_scores`
+  保留各片段分），实测 ~15× 提速。full 模式默认全长对接（更保守）。
 - **VHH pLDDT 门槛（R11/G9）**：ESMFold 对 VHH 的 pLDDT 因 CDR3 loop 无序而
   集中在 30-35（100 条实测 p50=31.5、p90=34.5、>45 仅 1 条），旧 45/70 门槛
   让 fast 模式只剩 1 个对接样本。现 fast 35 / full 50（`vhh_plddt_min` 可覆盖），

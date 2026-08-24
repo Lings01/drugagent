@@ -34,7 +34,7 @@ pdbbind 修复。本轮先确认上一轮 e2e（projects/r10_e2e）：仍在运�
 |---|---|---|
 | G8 | 阶段级幂等 | 新 `drugagent/agent/stages.py`：每阶段的"完成判据"（state.json 标记位）+ 缓存摘要；6 个 `run_*`/`build_report` 工具加 `force` 参数，stage json 完整 → 整体跳过。低层产物幂等（pdbqt/mdrun/xvg 缓存）不动 |
 | G9 | VHH 命中面 | 实测 100 条已建模 VHH 的 pLDDT 分布：p50=31.5 / p90=34.5 / >45 仅 1 条 → 旧 45 门槛 fast 模式只剩 1 个对接样本。fast 门槛 45→35、fast 屏 40→80、full 70→50；`vhh_plddt_min` 进 Defaults（options/CLI 可覆盖）；修 screen_vhh 写死 "pLDDT>70" 的误导日志 |
-| G10 | VHH 对接提速 | 默认**刚性**对接：全长 VHH 是 ESMFold 单模型单构象，200+ 扭转只拖慢不增益；且该 vina 构建大配体单核（R10 证据）。发现坑：此构建**所有**配体（含小分子）都要 ROOT/ENDROOT 分子图，无图 ligand 报 "Unknown or inappropriate tag" → 刚性 = `TORSDOF 0`（图保留、扭转清零），`make_rigid_pdbqt()` + PDBQT 缓存带 flex/rigid 一致性检查。`vhh_dock_flex` 可开柔性。基准：`scripts/bench_vhh_dock.py`（rigid vs flex 同条件） |
+| G10 | VHH 对接提速 | 默认**刚性**对接：全长 VHH 是 ESMFold 单模型单构象，200+ 扭转只拖慢不增益；且该 vina 构建大配体单核（R10 证据）。发现坑：此构建**所有**配体（含小分子）都要 ROOT/ENDROOT 分子图，无图 ligand 报 "Unknown or inappropriate tag" → 刚性 = `TORSDOF 0`（图保留、扭转清零），`make_rigid_pdbqt()` + PDBQT 缓存带 flex/rigid 一致性检查。`vhh_dock_flex` 可开柔性。基准：`scripts/bench_vhh_dock.py`（rigid vs flex 同条件）。**G10-v2 CDR 片段对接**（基准的直接推论，见结果 3）：fast 默认 `vhh_dock_cdr_only`，按 pLDDT 低值连续区切 1-3 个片段分别对接，取最佳分 |
 | R5 | 柔性工作流自动判据 | 前半：`analyze_completeness` 对无配体/无金属结构加 info 级 `apo_target` issue（提示后续 MD 判据）；后半：`interpret_stability` 加判据——apo + 平均 RMSF > 2.5 Å → 自动建议"短 MD 系综 + 柔性靶点工作流"（md_summary 把 is_ligand 注入 summary） |
 | status | 命令增强 | 每阶段完成度+关键数字（对接数/命中/库名含回退标注/设计数/MD ns+final RMSD）、磁盘阶段 JSON 产物清单、最近 3 条工具失败（state.errors + transcript ok=false）、transcript 尾行 |
 | pdbbind | 库修复 | 根因查实：pdbbind.org.cn 两个 tar.gz URL 已 404（下载改为注册制 download.php），138 字节文件就是 nginx 404 页。`_setup_pdbbind` 校验大小+tar 可读、丢坏件、软失败（resolve_library 回退 chembl35_small 兜底），不再打断整体 setup |
@@ -43,16 +43,69 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
 独立 e2e 验证，单列一轮更稳。
 
 ### 验证
-- [x] 快速套件全绿：175 通过（新增 28：stages 20 / vhh 5 / r5 2 / cli 1）
-- [ ] e2e：projects/r10_e2e 收尾验证（上轮遗留，VHH 阶段进行中）
-- [ ] G10 基准：rigid vs flex 单 VHH 对接计时（scripts/bench_vhh_dock.py）
-- [ ] 文档：README（模块 D 行/两层幂等/status/VHH 对接与 pLDDT 门槛/库回退）
+- [x] 快速套件全绿：181 通过（新增 34：stages 20 / vhh 4+1+4+1 / r5 1+1 / cli 2+1+1）
+- [x] 文档：README（模块 D 行/两层幂等/status/VHH 对接与 pLDDT 门槛/库回退）
+- [x] G10 基准（scripts/bench_vhh_dock.py，vhh_30 773 原子 @1HVI，exh=1）
+- [ ] e2e：projects/r10_e2e 收尾验证（上轮遗留；本轮监控中：track A 完成
+  （1 条柔性对接 76 min）→ track B 2 设计完成 → MD 阶段进行中）
 
 ### 结果
-（完成后补）
+1. **G8 阶段级幂等**：`agent/stages.py` 定义 6 阶段完成判据 + 缓存摘要；
+   6 个整段工具加 `force`。单测覆盖：完成→复用（模块函数零调用）、
+   force→真跑、未完成→真跑、scripted no-llm 全阶段跳过端到端。
+2. **G9 VHH 命中面**：100 条已建模 VHH（真实库前 100）pLDDT 实测
+   p50=31.5 / p75=33.2 / p90=34.5 / >45 仅 1 条 → fast 门槛 45→35
+   （~6-10 条过阈 vs 旧 1 条）、fast n 40→80、full 70→50；
+   `vhh_plddt_min`/`vhh_dock_flex` 进 Defaults + CLI。
+3. **G10 刚性对接 + 基准（本轮最重要的测量）**：
+   - 发现此 vina（AD4 血缘 f458505-mod）**所有** ligand 必须带 ROOT/ENDROOT
+     分子图（小分子筛选一直是这么跑的），无图 ligand 报
+     "Unknown or inappropriate tag" → 刚性 = 图保留 + `TORSDOF 0`。
+   - 计时（exh=1，同网格）：200 原子片段 3.4 min；**200 原子
+     TORSDOF 0 vs TORSDOF 20 = 3.4 vs 3.6 min（无差异 → 该构建忽略/自推
+     扭转数，成本由原子数主导，~O(n^1.9-2.2)）**；全长 773 原子
+     flex=76 min（e2e 实测）、rigid=101 min（bench，系统 swap 压力
+     302GB 下）→ 同量级，刚性不更慢。
+   - **刚性 vs 柔性最优 pose 分数几乎相同**：rigid 214373513.9 vs
+     flex 214373512.5（~2.1e8 kcal/mol，差 1.4）→ 搜索收敛到同一个
+     "撞墙" pose（773 原子塞进 25.84 Å 盒，绝大部分原子在盒外吃罚分）。
+   - 结论：刚性默认 = 语义正确 + pose 质量不劣 + 不更慢；**但绝对分
+     目前由撞墙主导、意义有限** → 真正杠杆是缩小配体/盒子（CDR 片段
+     对接：~100-200 原子 ≈ 3-5 min/候选，~15-20×）。
+3b. **G10 v2 CDR 片段对接（本轮补做，基准的直接推论）**：
+   - `vhh_cdr_fragments(pdb)`：按残基平均 pLDDT < 50 的连续区（=CDR/
+     loop 候选）切片段，两侧各 pad 2 残基，≥4 残基，取最大 3 个；整结构
+     都低（单 run 覆盖 >60%）则回退全长对接。
+   - `dock_vhh_candidates(cdr_only=True)`：每个候选对接其片段，综合分 =
+     最佳（最低）片段分，`fragment_scores` 保留各片段分。
+   - fast 默认开（`vhh_dock_cdr_only`，Defaults+CLI 可覆盖），full 默认关。
+   - **实测**（vhh_30 真实模型）：frag0=30 残基/257 原子对接 **6.25 min**
+     （vs 全长 ~80-100 min，~13-16×）；frag1/2 ≈100 原子更快。
+   - 修了 screen_vhh 一个潜伏 NameError（日志行 `plddtt_min`，无测试
+     覆盖路径 → 新增 screen_vhh 假路径冒烟测试捕获）。
+4. **R5 自动判据**：apo 结构在 analyze_completeness 出 info 级
+   `apo_target` issue；interpret_stability 判据（apo + 平均 RMSF>2.5 Å
+   → 短 MD 系综 + 柔性靶点工作流建议），md_summary 注入 is_ligand。
+5. **status 增强**：阶段 ✓/✗+关键数字、产物清单、最近 3 条工具失败。
+   实测 r10_e2e 输出正确（含 dtp 回退标注 + 早期 dtp 失败记录）。
+6. **pdbbind**：138 字节文件 = nginx 404 页（两 URL 均 404，下载改注册制
+   download.php）。setup 校验 + 软失败；坏件已删。
 
-### 反思 / 下轮缺口
-（完成后补）
+### 反思 / 下轮缺口（按优先级）
+1. **G10 v3 片段对接打磨**：frag0（257 原子）仍偏大（~6 min），可加
+   片段上限（如 ≤200 原子时截断到 CDR 核心区）或把盒子随片段自适应
+   （当前用 pocket 盒，片段在盒外仍吃罚分，2.3e7 量级仍偏撞墙）。
+   e2e 验证：r10_e2e 重跑时 vhh 阶段已完成（G8 会跳过）→ 需
+   `run_vhh(force=true)` 或新项目验证 CDR 对接全链路。
+2. **R1 真·结构域 RMSD**：DSSP 域边界/NMDYN 式动态域，`gmx_analyze
+   kind="domain"`（分链+柔性区已覆盖大部分需求，收尾项）。
+3. **G8 收尾验证**：r10_e2e 跑完后重跑同命令 → 全阶段秒级复用
+   （本轮已留验证入口）。
+4. DTP 下载重试（dtpbase.org 偶活）；pdbbind 注册后手动补库。
+5. 易用性：`drugagent rerun --stage X`（force 的 CLI 化）；
+   vhh_screen 的 pLDDT 分布直方图进报告（G9 门槛选择可视化）。
+6. 报告检查（上轮遗留）：r10_e2e 报告里柔性区/interpretation/回退库
+   标注核对（e2e 收尾时做）。
 
 ## 第 10 轮
 

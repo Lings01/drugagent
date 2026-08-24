@@ -118,6 +118,75 @@ def model_vhh_one(args: tuple) -> dict:
 # --------------------------------------------------------------------------- #
 # track A: screening
 # --------------------------------------------------------------------------- #
+def vhh_cdr_fragments(pdb: Path, *, plddt_cutoff: float = 50.0, pad: int = 2,
+                      min_res: int = 4, max_frags: int = 3) -> list[list[tuple[str, int]]]:
+    """R11/G10-v2: CDR/loop-candidate fragments from a modeled VHH.
+
+    Residues whose mean pLDDT (PDB B-factor) is below `plddt_cutoff` are
+    loop/CDR-like; take maximal contiguous runs (resSeq consecutive within
+    a chain), pad each side by `pad` residues, keep runs >= `min_res`.
+    Returns up to `max_frags` fragments (largest first) as
+    [(chain, resSeq), ...]. Returns [] when nothing qualifies or a single
+    run covers most of the structure (caller falls back to full-VHH
+    docking). Benchmark basis (scripts/bench_vhh_dock.py): docking cost
+    scales ~O(n^1.9) with ligand atom count, so a 100-200-atom fragment
+    docks in ~3-5 min vs ~80 min for the full 773-atom VHH."""
+    per_res: dict[tuple[str, int], list[float]] = {}
+    try:
+        with open(pdb) as fh:
+            for line in fh:
+                if line.startswith(("ATOM", "HETATM")) and line[17:20] != "WAT":
+                    try:
+                        res = (line[21:22].strip() or "A", int(line[22:26]))
+                        per_res.setdefault(res, []).append(float(line[60:66]))
+                    except (ValueError, IndexError):
+                        continue
+    except OSError:
+        return []
+    if not per_res:
+        return []
+    # group by chain, sorted by resSeq
+    chains: dict[str, list[tuple[int, float]]] = {}
+    for (ch, n), bs in per_res.items():
+        chains.setdefault(ch, []).append((n, float(np.mean(bs))))
+    frags: list[list[tuple[str, int]]] = []
+    for ch, items in chains.items():
+        items.sort(key=lambda x: x[0])
+        nums = [n for n, _ in items]
+        lo = {n: v for n, v in items}
+        # maximal contiguous low-pLDDT runs
+        run: list[int] = []
+        def _flush():
+            if len(run) >= min_res:
+                a = max(min(nums), run[0] - pad)
+                b = min(max(nums), run[-1] + pad)
+                frags.append([(ch, k) for k in range(a, b + 1) if k in lo])
+        for n in nums:
+            if lo[n] < plddt_cutoff:
+                run.append(n)
+            else:
+                _flush()
+                run = []
+        _flush()
+    # drop runs that are basically the whole structure
+    n_res = len(per_res)
+    frags = [f for f in frags if len(f) < 0.6 * n_res]
+    frags.sort(key=len, reverse=True)
+    return frags[:max_frags]
+
+
+def _write_fragment_pdb(pdb: Path, frag: list[tuple[str, int]], out: Path) -> Path:
+    """Write a PDB containing only the fragment's residues (all atoms)."""
+    keep = set(frag)
+    with open(pdb) as fh:
+        src = fh.read().splitlines()
+    lines = [l for l in src
+             if not l.startswith(("ATOM", "HETATM"))
+             or (l[21:22].strip() or "A", int(l[22:26])) in keep]
+    out.write_text("".join(l + "\n" for l in lines))
+    return out
+
+
 def _pdbqt_is_flex(pdbqt: Path) -> bool:
     """True if the ligand PDBQT has ACTIVE torsions (TORSDOF n>0).
 
@@ -135,10 +204,28 @@ def _pdbqt_is_flex(pdbqt: Path) -> bool:
     return False
 
 
+def _dock_ligand(model_dir: Path, src_pdb: Path, idx: str, rec_pdbqt,
+                 pocket, cpu: int, flex: bool) -> dict:
+    """Convert src_pdb -> pdbqt (cached, flex/rigid consistent) and dock."""
+    lig_pdbqt = model_dir / f"vhh_{idx}.pdbqt"
+    if lig_pdbqt.is_file() and _pdbqt_is_flex(lig_pdbqt) != flex:
+        lig_pdbqt.unlink()
+    if not lig_pdbqt.is_file():
+        to_pdbqt(src_pdb, lig_pdbqt)          # graph + element fixes
+        if not flex:
+            make_rigid_pdbqt(lig_pdbqt)       # TORSDOF 0 -> rigid body
+    # full VHH is a huge "ligand"; scale exhaustiveness down or docking
+    # takes hours per candidate (even rigid, >100 atoms is a big grid)
+    n_atoms = sum(1 for l in open(lig_pdbqt) if l.startswith("ATOM"))
+    exh = 8 if n_atoms < 100 else 1
+    prefix = model_dir / f"vhh_{idx}_dock"
+    return dock_one((rec_pdbqt, str(lig_pdbqt), str(prefix), pocket, exh, cpu))
+
+
 def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
                         pocket, *, n_jobs: int = 8,
-                        flex: bool = False) -> list[dict]:
-    """R10/G7 (+R11/G10): parallel VHH -> PDBQT -> Vina docking.
+                        flex: bool = False, cdr_only: bool = False) -> list[dict]:
+    """R10/G7 (+R11/G10 +G10-v2): parallel VHH -> PDBQT -> Vina docking.
 
     Was a serial for-loop: with full-length VHHs (hundreds of rotatable
     bonds) a single vina run takes minutes, so 100 candidates meant hours.
@@ -151,8 +238,17 @@ def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
     folded domain from a single ESMFold model carries one conformation, so
     the torsional search space buys little while dominating the runtime
     (this vina build also runs single-core on large ligands — `--cpu 64`
-    measured 1 core, see ROUNDLOG R10). Returns the candidate dicts
-    updated with the docking result."""
+    measured 1 core, see ROUNDLOG R10).
+
+    R11/G10-v2: `cdr_only=True` (fast default) docks the CDR/loop
+    FRAGMENTS instead of the full VHH. Benchmark basis: cost ~O(n^1.9) in
+    ligand atom count, and the full-VHH score is clash-dominated (773
+    atoms in a 25.84 Å box) — fragments (100-200 atoms) dock in ~3-5 min
+    and their scores are interpretable. The composite candidate score is
+    the best (lowest) fragment score; per-fragment scores are kept in
+    `fragment_scores`. Falls back to full-VHH docking when no fragment
+    qualifies. Returns the candidate dicts updated with the docking
+    result."""
     if not ok:
         return []
     n_jobs = max(1, min(n_jobs, len(ok), 16))
@@ -160,19 +256,29 @@ def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
 
     def _dock(r: dict) -> dict:
         pdb = model_dir / f"vhh_{r['idx']}.pdb"
-        lig_pdbqt = model_dir / f"vhh_{r['idx']}.pdbqt"
-        if lig_pdbqt.is_file() and _pdbqt_is_flex(lig_pdbqt) != flex:
-            lig_pdbqt.unlink()
-        if not lig_pdbqt.is_file():
-            to_pdbqt(pdb, lig_pdbqt)          # graph + element fixes
-            if not flex:
-                make_rigid_pdbqt(lig_pdbqt)   # TORSDOF 0 -> rigid body
-        # full VHH is a huge "ligand"; scale exhaustiveness down or docking
-        # takes hours per candidate (even rigid, >100 atoms is a big grid)
-        n_atoms = sum(1 for l in open(lig_pdbqt) if l.startswith("ATOM"))
-        exh = 8 if n_atoms < 100 else 1
-        prefix = model_dir / f"vhh_{r['idx']}_dock"
-        d = dock_one((rec_pdbqt, str(lig_pdbqt), str(prefix), pocket, exh, cpu))
+        if cdr_only:
+            frags = vhh_cdr_fragments(pdb)
+            if frags:
+                frag_scores = []
+                for fi, frag in enumerate(frags):
+                    tag = f"{r['idx']}_frag{fi}"
+                    frag_pdb = model_dir / f"vhh_{tag}.pdb"
+                    if not frag_pdb.is_file():
+                        _write_fragment_pdb(pdb, frag, frag_pdb)
+                    d = _dock_ligand(model_dir, frag_pdb, tag, rec_pdbqt,
+                                     pocket, cpu, flex)
+                    if d.get("ok") and d.get("score") == d.get("score"):
+                        frag_scores.append(d["score"])
+                best = min(frag_scores) if frag_scores else None
+                return dict(r, ok=bool(frag_scores),
+                            score=best if best is not None else np.nan,
+                            rmsd_lb=np.nan, rmsd_ub=np.nan,
+                            top_pose_pdbqt=None,
+                            n_fragments=len(frags),
+                            fragment_scores=frag_scores)
+        # full-VHH path (also the cdr_only fallback)
+        d = _dock_ligand(model_dir, pdb, str(r["idx"]), rec_pdbqt, pocket,
+                         cpu, flex)
         return dict(r, **d)
 
     return pmap(_dock, ok, n_jobs=n_jobs)
@@ -207,14 +313,16 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
     ok.sort(key=lambda r: r["plddt"], reverse=True)
     ok = ok[: int(d.vhh_screen_n)]
     logger.info(f"VHH modeling: {len(results)} total, {len(ok)} pass "
-                f"pLDDT>{plddtt_min:g} and top-{int(d.vhh_screen_n)}")
+                f"pLDDT>{plddt_min:g} and top-{int(d.vhh_screen_n)}")
 
-    # dock (R10/G7: parallel; R11/G10: rigid bodies by default — a full
-    # VHH is a ~700-atom "ligand" and flexible torsions + this vina build's
-    # single-core big-ligand behavior made each call 15-30 min)
+    # dock (R10/G7: parallel; R11/G10: rigid bodies by default; R11/G10-v2:
+    # CDR-fragment docking in fast mode — full-VHH dock is ~80-100 min and
+    # clash-dominated; fragments ~3-5 min with interpretable scores)
     flex = bool(d.vhh_dock_flex)
+    cdr_only = bool(d.vhh_dock_cdr_only)
     docked_all = dock_vhh_candidates(ok, model_dir, rec_pdbqt, pocket,
-                                     n_jobs=n_jobs, flex=flex)
+                                     n_jobs=n_jobs, flex=flex,
+                                     cdr_only=cdr_only)
     docked = [r for r in docked_all if r.get("ok")]
     docked.sort(key=lambda r: r.get("score", 0))
     return {
