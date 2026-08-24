@@ -241,6 +241,8 @@ def test_screen_vhh_end_to_end_fake(tmp_path, monkeypatch):
     assert out["n_docked"] == 5
     assert out["results"][0]["plddt"] == 40.0
     assert seen.get("flex") is False
+    # R13: full pLDDT distribution for the report histogram
+    assert out["plddt_all"] == [40.0] * 5
     # fast gate (35) keeps pLDDT 40; full gate (50) would drop it
     state["options"] = {}
     monkeypatch.setattr(vh, "model_vhh_one",
@@ -455,3 +457,128 @@ def test_dock_vhh_candidates_no_frag_skip(tmp_path, monkeypatch):
                                   full_fallback=True)
     assert out2[0]["ok"] and out2[0]["score"] == -5.0
     assert "2" in full_calls
+
+
+# --------------------------------------------------------------------------- #
+# R13: design validation cache (G8 at design granularity)
+# --------------------------------------------------------------------------- #
+def _design_pdb(tmp_path, name, res="GLY"):
+    lines = []
+    for i in range(1, 6):
+        lines.append(
+            f"ATOM  {i:>5d} {res:>4s} {res[:3]:>4s} A{i:>4d}    "
+            f"{float(i):8.3f}{float(i):8.3f}{float(i):8.3f}"
+            f"{1.00:6.2f}{0.00:6.2f}")
+    p = tmp_path / name
+    p.write_text("\n".join(lines) + "\nEND\n")
+    return p
+
+
+def test_score_designs_cache(tmp_path, monkeypatch):
+    """R13: design validation is cached in scored.json keyed by design
+    mtime — re-runs skip already-validated designs (no ESMFold re-pay),
+    and a changed design (mtime) is re-validated."""
+    from drugagent.modules import vhh as vh
+    d = tmp_path / "vhh_designs"
+    d.mkdir()
+    p0 = _design_pdb(d, "vhh_design_0.pdb")
+    p1 = _design_pdb(d, "vhh_design_1.pdb")
+    calls = []
+
+    def fake_predict(seqs, **kw):
+        calls.append(tuple(seqs))
+        return {"mean_plddt": 70.0, "plddt": [80.0] * 20, "pdb": "X"}
+
+    def fake_im(comp_pdb, plddt):
+        return {"interface_plddt_mean": 60.0, "interface_plddt_min": 50.0,
+                "n_interface_residues": 10}
+
+    # stub out the chain/complex helpers (single-chain fake designs);
+    # patch the binder module — score_designs imports them locally
+    from drugagent.modules import binder as binder_mod
+    monkeypatch.setattr(binder_mod, "_chain_ids", lambda p: ["A"])
+    monkeypatch.setattr(binder_mod, "_ca_sequence", lambda p, c: "GGLGG")
+    monkeypatch.setattr(binder_mod, "_make_complex",
+                        lambda a, b, o: open(o, "w").write("MODEL") or o)
+    out1 = vh.score_designs([p0, p1], d, tmp_path / "clean.pdb",
+                            predict_fn=fake_predict, im_fn=fake_im)
+    assert len(out1) == 2 and calls and len(calls) == 2
+    assert (d / "scored.json").is_file()
+    assert out1[0]["complex_plddt"] == 70.0
+
+    # second pass: fully cached -> zero new predictions
+    calls.clear()
+    out2 = vh.score_designs([p0, p1], d, tmp_path / "clean.pdb",
+                            predict_fn=fake_predict, im_fn=fake_im)
+    assert not calls
+    assert out2[0]["complex_plddt"] == 70.0
+    assert out2[0]["interface_plddt_mean"] == 60.0
+
+    # changed design (new mtime) -> only that one re-validated
+    import time as _t
+    _t.sleep(0.01)
+    p1.write_text(p1.read_text() + "REMARK changed\n")
+    st1 = p1.stat().st_mtime
+    p1_utime = st1
+    import os
+    os.utime(p1, (st1, st1 + 1.0))
+    calls.clear()
+    out3 = vh.score_designs([p0, p1], d, tmp_path / "clean.pdb",
+                            predict_fn=fake_predict, im_fn=fake_im)
+    assert len(calls) == 1  # only design_1 re-scored
+
+
+def test_design_vhh_glob_skips_byproducts(tmp_path, monkeypatch):
+    """R13: track B validates only top-level vhh_design_N.pdb, not the
+    scoring by-products (vhh_design_N_binder/_complex.pdb) which the
+    old glob picked up and re-validated (spawning more by-products)."""
+    from drugagent.modules import vhh as vh
+    from drugagent.modules import binder as binder_mod
+    from drugagent.modules import esmfold_run as esm
+    wd = tmp_path / "04_vhh"
+    wd.mkdir()
+    outdir = wd / "vhh_designs"
+    outdir.mkdir()
+    (tmp_path / "clean.pdb").write_text("ATOM      1  CA GLY A  1\nEND\n")
+    state = {"options": {"fast": True},
+             "target_prep": {"clean_pdb": str(tmp_path / "clean.pdb"),
+                             "pocket": {"center": [0, 0, 0], "xsize": 10,
+                                        "ysize": 10, "zsize": 10}}}
+    for name in ("vhh_design_0.pdb", "vhh_design_1.pdb",
+                 "vhh_design_0_binder.pdb", "vhh_design_0_complex.pdb"):
+        (outdir / name).write_text(_design_pdb_text())
+    calls = []
+
+    def fake_predict(seqs, **kw):
+        calls.append(tuple(seqs))
+        return {"mean_plddt": 65.0, "plddt": [80.0] * 10, "pdb": "X"}
+
+    monkeypatch.setattr(vh, "run_cmd", lambda *a, **k: 0)
+    monkeypatch.setattr(binder_mod, "rf_repo", lambda: tmp_path)
+    monkeypatch.setattr(binder_mod, "rf_python", lambda: "/bin/true")
+    monkeypatch.setattr(binder_mod, "pocket_hotspots",
+                        lambda *a: ["A1", "A2"])
+    monkeypatch.setattr(binder_mod, "_chain_ids", lambda p: ["A"])
+    monkeypatch.setattr(binder_mod, "_ca_sequence", lambda p, c: "GGLGG")
+    monkeypatch.setattr(binder_mod, "_make_complex",
+                        lambda a, b, o: open(o, "w").write("MODEL") or o)
+    monkeypatch.setattr(esm, "predict", fake_predict)
+    monkeypatch.setattr(esm, "interface_metrics",
+                        lambda comp, plddt: {"interface_plddt_mean": 55.0,
+                                             "interface_plddt_min": 40.0,
+                                             "n_interface_residues": 5})
+    out = vh.design_vhh(state, wd, n_designs=2)
+    assert out["n_designs"] == 2, "by-products counted as designs"
+    assert len(calls) == 2, "by-products were validated"
+    names = [Path(d["design"]).name for d in out["designs"]]
+    assert names == ["vhh_design_0.pdb", "vhh_design_1.pdb"]
+
+
+def _design_pdb_text():
+    lines = []
+    for i in range(1, 6):
+        lines.append(
+            f"ATOM  {i:>5d} GLY   GLY A{i:>4d}    "
+            f"{float(i):8.3f}{float(i):8.3f}{float(i):8.3f}"
+            f"{1.00:6.2f}{0.00:6.2f}")
+    return "\n".join(lines) + "\nEND\n"

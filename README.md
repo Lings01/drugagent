@@ -96,7 +96,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 │   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
 ├── DESIGN.md                         # 2.0 架构设计
 ├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (191 快测 + 15 slow e2e)
+├── tests/                            # pytest 套件 (197 快测 + 15 slow e2e)
 └── logs/                             # 构建/运行日志
 ```
 
@@ -114,7 +114,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 ## 测试
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (191 用例)
+env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (197 用例)
 env/bin/python -m pytest tests/ -q                   # 含 slow（需 vina/GROMACS/RF 权重）
 env/bin/python -m pytest tests/test_mdsim.py -m slow -q \    --basetemp=$PWD/data/fixtures/_ptmp             # MD e2e 建议本地盘 basetemp
 ```
@@ -280,6 +280,11 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   ~5 个数量级），片段对接 1.3-3 min。无有效片段时 fast 默认**跳过**
   （`vhh_dock_full_fallback=False`，该候选 score=NaN、pLDDT 仍参与综合排名）；
   full 模式默认全长对接（`full_fallback=True`，~100 min，更保守）。
+  **R13**：track B 设计验证（ESMFold 复杂打分）落 `vhh_designs/scored.json`
+  按设计 mtime 缓存（G8 下沉到设计粒度，rerun 只重验证被 RF 覆盖的设计）；
+  只验证顶层设计 `vhh_design_N.pdb`（旧 glob 会连带 `_binder`/`_complex`
+  副产物，12 文件当 6 设计）；VHH 节新增**文库 pLDDT 分布直方图**
+  （track_a.plddt_all + 门槛虚线）。
 - **VHH pLDDT 门槛（R11/G9）**：ESMFold 对 VHH 的 pLDDT 因 CDR3 loop 无序而
   集中在 30-35（100 条实测 p50=31.5、p90=34.5、>45 仅 1 条），旧 45/70 门槛
   让 fast 模式只剩 1 个对接样本。现 fast 35 / full 50（`vhh_plddt_min` 可覆盖），
@@ -306,10 +311,12 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   到自身 frame 0 → 逐帧域 RMSD 序列，隔离域内部形变；轨迹逐原子 PBC
   unwrap + frame 0 两级 make-whole（残基内一致 + 链走），否则跨盒残基会
   产生 50 Å+ 幻影距离；报告第 5 节有域表格+曲线）；(3) 规则引擎把上面
-  指标 + RMSF + 聚类汇总成中文"柔性解读"（整体稳定 / 域间相对运动 vs
-  域内展开 / 结构域构象漂移 / 高柔性区 / 无主导构象态 / 二级结构丢失），
-  写入 md summary 与报告第 5 节。`gmx_analyze` 新增 `kind=chain` /
-  `kind=ss`。
+  指标 + RMSF + 聚类 + **R13/R1-v2 域-其余蛋白相对 RMSD**（每帧把其余
+  蛋白 fit 到 frame 0、用同一变换测该域 → 铰链/变构刚体运动信号，
+  自拟合序列按构造消不掉它；报告域表"末端相对其余 (Å)"列 + 点线曲线，
+  解读注 9 分两档：内部稳定 <3 Å → 铰链特征，否则 → 构象重排为主）
+  汇总成中文"柔性解读"，写入 md summary 与报告第 5 节。`gmx_analyze`
+  新增 `kind=chain` / `kind=ss`。
   注意：MD 直接从 EM 起步，前 ~100-200 ps 属松弛段（Rg/链间 RMSD 会先跳变），
   解读时建议忽略早期段。
 - **刚性漏斗局限**：默认对接/设计基于单一刚性构象，柔性只在 MD 阶段采样；

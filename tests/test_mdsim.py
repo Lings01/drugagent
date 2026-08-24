@@ -1425,3 +1425,36 @@ def test_kabsch_recovers_known_rotation():
                   [np.sin(ang), np.cos(ang), 0.0], [0.0, 0.0, 1.0]])
     mob = ref @ R.T + [3.0, -2.0, 1.5]
     assert _kabsch_rmsd(mob, ref) < 1e-8
+
+
+def test_domain_vs_rest_rmsd_hinge():
+    """R13/R1-v2: a domain rotating RIGIDLY relative to the rest of the
+    protein -> self-fit RMSD ~ 0 but vs-rest RMSD grows with the angle
+    (the hinge signature that the self-fit series alone cannot show)."""
+    import numpy as np
+    from drugagent.modules.mdsim import (domain_rmsd_series,
+                                         domain_vs_rest_rmsd_series)
+    n_dom, n_rest = 8, 22  # domain res 1-8, rest res 9-30
+    F = 5
+    ts = np.linspace(0.0, 0.6, F)
+    frames = []
+    for t in ts:
+        dom = _rigid_block(n_dom, 0.0, t=t, rot_axis=(0.0, 0.0, 1.0))
+        rest = _rigid_block(n_rest, 12.0, t=0.0)
+        fr = np.full((n_dom + n_rest, 4, 3), np.nan)
+        fr[:n_dom, 1] = dom
+        fr[n_dom:, 1] = rest
+        frames.append(fr)
+    coords = np.stack(frames)
+    domains = [{"name": "dom1", "res_start": 1, "res_end": n_dom,
+                "n_res": n_dom}]
+    selfit = domain_rmsd_series(coords, domains)
+    vsrest = domain_vs_rest_rmsd_series(coords, domains)
+    assert set(vsrest) == {"dom1"}
+    assert len(vsrest["dom1"]) == F
+    # rigid rotation of the domain -> no internal distortion
+    assert max(selfit["dom1"]) < 1e-6
+    # but the domain moves relative to the rest -> growing vs-rest RMSD
+    assert vsrest["dom1"][0] < 1e-6
+    assert vsrest["dom1"][-1] > 1.0  # ~34 deg on a ~7 A-wide block
+    assert vsrest["dom1"][-1] > vsrest["dom1"][3] - 1e-9

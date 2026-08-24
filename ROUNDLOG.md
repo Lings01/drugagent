@@ -301,3 +301,73 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
 6. **status 命令增强**：显示各阶段产物与错误摘要（目前只有 ✓/✗ + 最后一条
    transcript）。
 7. DTP 下载重试（dtpbase.org 偶活）；pdbbind.tar.gz 138 字节也是坏的。
+
+---
+
+# 第 13 轮
+
+## 计划
+| # | 优先级 | 任务 | 依据（第 12 轮反思） |
+|---|--------|------|----------------------|
+| P1 | 高 | track B 设计验证缓存（scored.json，G8 下沉到设计粒度） | 反思 2：rerun 时 6 设计 × 6 min 无缓存重验证 |
+| P2 | 高 | R1-v2 域-其余蛋白相对 RMSD（铰链/变构检测）+ 解读注 + 报告列 | 反思 3：自拟合 RMSD 度量域内部形变，真铰链需相对 RMSD |
+| P3 | 中 | pLDDT 直方图进报告（G9 门槛 35/50 可视化） | 反思 4（原 P4 顺延） |
+
+### 验证
+- [x] 快速套件全绿：197（+5：scored.json 缓存、glob 副产物、hinge 签名、
+      直方图 ×2）
+- [x] r10_e2e md_rep1 真实轨迹 vs-rest（单副本）：5 域 vs-rest 末端
+      7.5-14.7 Å，全部 > 自拟合（3.6-6.7 Å）→ 域间相对运动签名
+- [x] `rerun --stage md` → state domain_rmsd_vs_rest + 解读注 9 触发
+      （dom3：相对其余末端 14.1 Å、自身 5.9 Å → "构象重排为主"分支）
+      + 报告域表 "末端相对其余 (Å)" 列 + 点线曲线 ✓
+- [x] `rerun --stage vhh` → scored.json 缓存（2 条目）+ 缓存复用日志
+      （"reusing cached validation"）+ plddt_all (n=80) + 报告 pLDDT
+      直方图 + 门槛线 ✓；总时长 ~3 h → **7.5 min**
+- [x] 文档 + git 提交
+
+### 结果
+1. **P1 track B 设计验证缓存**：`score_designs()` 抽出 + `scored.json`
+   持久缓存（按设计 PDB mtime 匹配；只缓存成功、错误下轮重试；每个
+   成功后增量写盘抗崩溃）。附带修掉一个 R12 遗留 bug：`vhh_design_*.pdb`
+   glob 把打分副产物（`_binder.pdb`/`_complex.pdb` 等）也当成设计验证
+   ——R12 rerun 的 "6 designs" 实为 2 设计 × 3 文件，且验证副产物又
+   生成新副产物（12 个）。现只验证 `vhh_design_N.pdb` 顶层设计。
+   **实测**：rerun vhh 从 ~3 h（R12）降到 **7.5 min**（track A 全缓存
+   复用 + 1 设计缓存复用 + 1 个被 RF 覆盖的设计重验证 6 min）。
+2. **P2 R1-v2 域-其余蛋白相对 RMSD**：`_kabsch_transform()` 抽出
+   （行向量约定 mobile @ M + t，M = U D Vt；顺带修掉上一轮重构引入的
+   转置 bug——准线性点云上 SVD 解的转置变体不是最优解，brute-force
+   验证 tr(R*H)=34.7 < λ=42）；`domain_vs_rest_rmsd_series()`：每帧
+   把其余蛋白（所有其他 CA）fit 到 frame 0，用同一变换测该域 →
+   域刚体相对运动（自拟合序列按构造消掉的铰链信号）。summary 新增
+   `domain_rmsd_vs_rest`（final/mean/series，多副本均值）；解读注 9
+   两分支（内部稳定 <3 Å → "铰链/变构结构域特征"；否则 → "域运动以
+   构象重排为主"）；报告域表新列 + 点线曲线。
+   **实测（r10_e2e 3 副本）**：vs-rest 末端 8.4-14.1 Å（自拟合
+   4.5-5.9 Å）——HIV-PR β-三明治 apo 5 ns 呈半刚性域重排，dom3
+   （82-98）最大：vs-rest 14.1 Å + 自身 5.9 Å → 注 9 柔性分支触发。
+3. **P3 pLDDT 直方图**：screen_vhh 返回 `plddt_all`（全建模库分布，
+   n=80 浮点）；报告 VHH 节渲染直方图 + `vhh_plddt_min` 门槛虚线
+   （fast 35 / full 50 随 options 自适应）。
+4. **e2e 汇总（r10_e2e 最新状态）**：vhh_30 综合分 1.0（pLDDT 46.8 +
+   frag1 -8.66 kcal/mol）居首；track B 2 设计（interface pLDDT 46.4，
+   综合 0.31）；MD 域表 6 列 + 注 9；报告 pLDDT 直方图 n=80。
+
+### 反思 / 下轮缺口
+1. **binder 模块同款缓存缺失**：`binder.score_designs`（小分子/肽
+   设计验证，tools_design.py）与 VHH track B 同构——无 per-design
+   缓存、glob 可能同样吃到副产物。下轮把 `score_designs` 的缓存
+   模式复用过去（或抽公共 helper）。
+2. **vs-rest 阈值 4 Å 偏严/偏松未标定**：HIV-PR 5 ns 全部域超阈值
+   （8-17 残基短域在 5 ns 尺度本就有大位移）。需要"域尺寸归一"
+   （如 vs-rest RMSD / 域直径，或按域残基数分档）才能跨靶点可比；
+   下轮在 2-3 个不同靶点（大/小、刚/柔）上标定阈值。
+3. **scored.json 无失效判据（除 mtime）**：ESMFold 权重/参数变化后
+   缓存应失效（加版本号或 ckpt hash 进缓存键）。
+4. **直方图只有门槛线**：可加 p50/p90 标注 + 过门槛计数文字
+   （"80 条中 6 条过 35"）——纯展示增强。
+5. **track B 2 设计 interface pLDDT 相同（46.4）**：可能是 RF
+   scaffold-guided 的噪声尺度问题或验证复用了同一复杂——下轮抽查
+   两个设计的序列/构象是否实质不同（若 RF 每次生成近似设计，n_designs
+   >1 的价值存疑）。

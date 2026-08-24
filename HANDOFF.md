@@ -1,12 +1,12 @@
-# DrugAgent 2.0 — 交接说明（第 12 轮结束）
+# DrugAgent 2.0 — 交接说明（第 13 轮结束）
 
 ## 一句话状态
-代码库处于"第 12 轮迭代完成"状态：**G10-v3 CDR 片段对接打磨**（长片段
-切块 + 片段自适应盒子 + 无片段跳过）、**R1 真结构域 RMSD**（SS 域提取 +
-域自拟合 Kabsch + 4 个 PBC/Kabsch 坑修复）、**`rerun --stage X` CLI**、
-bench 收尾（同条件 rigid/flex 分数差 <0.001 kcal/mol）。快速测试 191/191
-绿。r10_e2e 经 `rerun --stage vhh` 全链路重验：vhh_30 frag1 = -8.66
-kcal/mol（真正有利的片段结合分），综合分 1.0 居首。
+代码库处于"第 13 轮迭代完成"状态：**track B 设计验证缓存**（scored.json
++ 顶层设计 glob 修复，rerun vhh 从 ~3 h 降到 7.5 min）、**R1-v2 域-其余
+蛋白相对 RMSD**（铰链/变构检测 + 解读注 9 + 报告列/曲线）、**pLDDT 分布
+直方图**（G9 门槛可视化）。快速测试 197/197 绿。r10_e2e 全状态最新：
+vhh_30 综合分 1.0 居首（frag1 -8.66 kcal/mol）、MD 域表含相对其余列 +
+注 9（dom3 构象重排 14.1 Å）。
 
 ## 关键路径
 - 项目根：`/home/data/lrs/drug/drugagent`（唯一可写持久盘；**/tmp 是 tmpfs
@@ -17,6 +17,26 @@ kcal/mol（真正有利的片段结合分），综合分 1.0 居首。
   （产物幂等复用：重跑同一 `--name` 会跳过已完成阶段产物）
 - 轮次记录：`ROUNDLOG.md`（每轮计划/结果/反思，下轮计划从"反思/下轮缺口"开始）
 - git 仓库已初始化（.gitignore 覆盖 env/data/projects/日志）
+
+## 第 13 轮已完成（见 ROUNDLOG 详情）
+1. **track B 设计验证缓存**：`vhh.score_designs()`（抽出）+
+   `vhh_designs/scored.json` 按设计 PDB mtime 缓存（只缓存成功、错误
+   重试、增量写盘）。**附带 bug 修复**：`vhh_design_*.pdb` glob 把打分
+   副产物（`_binder`/`_complex`/`_binder_complex`…）当设计验证且自我繁殖
+   （12 文件当 6 设计）——现只匹配 `vhh_design_N.pdb` 顶层设计。
+   **实测 rerun vhh：~3 h → 7.5 min**（track A dock 缓存复用 + 设计
+   验证缓存 + 1 个被 RF 覆盖的设计重验证）。
+2. **R1-v2 域-其余蛋白相对 RMSD**：`mdsim._kabsch_transform()`（行向量
+   约定 mobile @ M + t，M = U D Vt；修掉 R12 重构引入的转置 bug——
+   准线性点云上转置 SVD 解非最优，brute-force 验证）；
+   `domain_vs_rest_rmsd_series()`（每帧 fit 其余蛋白到 frame 0，同变换
+   测该域 → 铰链/变构信号）。summary 新增 `domain_rmsd_vs_rest`
+   （final/mean/series，多副本均值）；解读注 9 两分支；报告域表
+   "末端相对其余 (Å)" 列 + 点线曲线。**实测 r10_e2e（3 副本）**：
+   vs-rest 末端 8.4-14.1 Å（自拟合 4.5-5.9 Å）——HIV-PR apo 5 ns 半刚性
+   域重排，dom3 (82-98) 最大 → 注 9 柔性分支。
+3. **pLDDT 直方图**：screen_vhh 返回 `plddt_all`（全建模库，n=80）；
+   报告 VHH 节直方图 + `vhh_plddt_min` 门槛虚线（随 fast/full 自适应）。
 
 ## 第 12 轮已完成（见 ROUNDLOG 详情）
 1. **G10-v3 CDR 片段打磨**：(a) >20 残基 low-pLDDT run 自动切 ≤20 残基块

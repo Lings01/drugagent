@@ -15,7 +15,7 @@ from loguru import logger
 
 from ..config import DEFAULTS, LIBRARIES, TOOLS, resolve_defaults
 from ..llm import AgentBrain
-from ..utils import jsave, pmap, run_cmd
+from ..utils import jload, jsave, pmap, run_cmd
 from .screening import dock_one, os_cpu
 from .target_prep import make_rigid_pdbqt, to_pdbqt
 
@@ -404,6 +404,9 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
         "n_library": len(seqs),
         "n_modeled": len(results),
         "n_docked": sum(1 for r in docked_all if r.get("ok")),
+        # R13: full pLDDT distribution of the modeled library (report
+        # histogram, G9 threshold visualization) — small (n floats)
+        "plddt_all": [r["plddt"] for r in results if r.get("plddt") is not None],
         "results": docked[:50],
     }
 
@@ -411,6 +414,77 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
 # --------------------------------------------------------------------------- #
 # track B: de novo design on VHH scaffold
 # --------------------------------------------------------------------------- #
+def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
+                  predict_fn=None, im_fn=None) -> list[dict]:
+    """R13: ESMFold-complex scoring of RF designs with a persistent
+    per-design cache (``scored.json``).
+
+    G8 idempotency at design granularity: a design whose PDB mtime
+    matches the cached entry is reused without paying the ~6 min
+    ESMFold validation again. A re-written design (RF re-run) changes
+    the mtime and is re-validated. Failed validations are not cached
+    (retried on the next run). Writes after each success (crash-safe).
+    ``predict_fn``/``im_fn`` are injectable for tests."""
+    from ..modules.binder import (_ca_sequence, _chain_ids, _design_chain,
+                                  _extract_chain, _make_complex)
+    from ..modules.esmfold_run import interface_metrics, predict
+    predict_fn = predict_fn or predict
+    im_fn = im_fn or interface_metrics
+    cache_path = outdir / "scored.json"
+    cache = jload(cache_path) if cache_path.is_file() else {}
+    scored: list[dict] = []
+    for pdb in designs:
+        name = pdb.stem
+        entry = {"design": str(pdb)}
+        cached = cache.get(name)
+        if cached and cached.get("mtime") == pdb.stat().st_mtime:
+            entry.update({k: v for k, v in cached.items() if k != "mtime"})
+            logger.info(f"design {name}: reusing cached validation "
+                        f"(interface pLDDT "
+                        f"{cached.get('interface_plddt_mean')})")
+            scored.append(entry)
+            continue
+        try:
+            # RF outputs may carry the target as an extra chain; score
+            # only the designed (all-GLY) chain against the target
+            binder_pdb = pdb
+            if len(_chain_ids(pdb)) > 1:
+                binder_pdb = outdir / f"{name}_binder.pdb"
+                _extract_chain(pdb, _design_chain(pdb), binder_pdb)
+            comp_pdb = outdir / f"{name}_complex.pdb"
+            _make_complex(clean_pdb, binder_pdb, comp_pdb)
+            out = predict_fn([_ca_sequence(comp_pdb, "A"),
+                              _ca_sequence(comp_pdb, "B")],
+                             num_recycles=3, device="cpu")
+            comp_pdb.write_text(out["pdb"])
+            rp = out.get("res_present")
+            im = im_fn(comp_pdb,
+                       out["plddt"][rp] if rp is not None else out["plddt"])
+            entry.update(
+                complex_plddt=out["mean_plddt"],
+                interface_plddt_mean=im.get("interface_plddt_mean"),
+                interface_plddt_min=im.get("interface_plddt_min"),
+                n_interface=im.get("n_interface_residues"),
+            )
+            # extract designed sequence (chain B)
+            entry["sequence"] = _ca_sequence(comp_pdb, "B")
+            # cache only successes (errors are retried next run)
+            cache[name] = {"mtime": pdb.stat().st_mtime,
+                           "complex_plddt": out["mean_plddt"],
+                           "interface_plddt_mean":
+                           im.get("interface_plddt_mean"),
+                           "interface_plddt_min":
+                           im.get("interface_plddt_min"),
+                           "n_interface": im.get("n_interface_residues"),
+                           "sequence": entry.get("sequence")}
+            jsave(cache_path, cache)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"vhh design scoring failed {name}: {e}")
+            entry["error"] = str(e)[:200]
+        scored.append(entry)
+    return scored
+
+
 def design_vhh(state: dict, workdir: Path, *, n_designs: int) -> dict:
     from ..modules.binder import rf_repo, rf_python
     from ..modules.binder import pocket_hotspots
@@ -459,45 +533,16 @@ def design_vhh(state: dict, workdir: Path, *, n_designs: int) -> dict:
             cmd.append(f"inference.ckpt_override_path={fallback}")
             logger.info("scaffoldguided: using InpaintSeq_Fold ckpt (fold ckpt missing)")
     run_cmd(cmd, cwd=repo, log_file=workdir / "vhh_design.log")
-    designs = sorted(outdir.glob("vhh_design_*.pdb"))
+    # R13: top-level designs only (vhh_design_N.pdb) — the glob also
+    # matches scoring by-products (vhh_design_N_binder.pdb,
+    # vhh_design_N_complex.pdb, ...), which used to be re-validated as
+    # if they were designs (and their validation spawned more of them)
+    designs = sorted(p for p in outdir.glob("vhh_design_*.pdb")
+                     if p.stem.split("_")[-1].isdigit())
     logger.info(f"VHH track B: {len(designs)} designs")
 
-    # score each design with ESMFold complex
-    from ..modules.binder import (_ca_sequence, _chain_ids, _design_chain,
-                                  _extract_chain, _make_complex)
-    from ..modules.esmfold_run import interface_metrics, predict
-
-    scored = []
-    for pdb in designs:
-        name = pdb.stem
-        entry = {"design": str(pdb)}
-        try:
-            # RF outputs may carry the target as an extra chain; score only
-            # the designed (all-GLY) chain against the target
-            binder_pdb = pdb
-            if len(_chain_ids(pdb)) > 1:
-                binder_pdb = outdir / f"{name}_binder.pdb"
-                _extract_chain(pdb, _design_chain(pdb), binder_pdb)
-            comp_pdb = outdir / f"{name}_complex.pdb"
-            _make_complex(Path(prep["clean_pdb"]), binder_pdb, comp_pdb)
-            out = predict([_ca_sequence(comp_pdb, "A"), _ca_sequence(comp_pdb, "B")],
-                          num_recycles=3, device="cpu")
-            comp_pdb.write_text(out["pdb"])
-            rp = out.get("res_present")
-            im = interface_metrics(comp_pdb,
-                                   out["plddt"][rp] if rp is not None else out["plddt"])
-            entry.update(
-                complex_plddt=out["mean_plddt"],
-                interface_plddt_mean=im.get("interface_plddt_mean"),
-                interface_plddt_min=im.get("interface_plddt_min"),
-                n_interface=im.get("n_interface_residues"),
-            )
-            # extract designed sequence (chain B)
-            entry["sequence"] = _ca_sequence(comp_pdb, "B")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"vhh design scoring failed {name}: {e}")
-            entry["error"] = str(e)[:200]
-        scored.append(entry)
+    # score each design with ESMFold complex (R13: cached in scored.json)
+    scored = score_designs(designs, outdir, Path(prep["clean_pdb"]))
     scored.sort(key=lambda x: (x.get("interface_plddt_mean") or 0), reverse=True)
     return {"track": "B_de_novo", "n_designs": len(designs), "designs": scored[:10]}
 

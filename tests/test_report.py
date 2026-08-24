@@ -212,3 +212,75 @@ def test_md_cluster_text_uses_summary_replicas(tmp_path):
     # no empty-dict rendering
     import re
     assert not re.search(r"rep\d+: \{\}", txt)
+
+
+def test_vhh_plddt_histogram(tmp_path):
+    """R13: VHH section renders a pLDDT distribution histogram with the
+    G9 threshold line when track_a carries plddt_all."""
+    state = {
+        "project_dir": str(tmp_path),
+        "options": {"fast": True, "llm_model": "test"},
+        "vhh": {
+            "track_a": {"track": "A_screening", "n_library": 80,
+                        "n_modeled": 80, "n_docked": 5,
+                        "plddt_all": [30 + i * 0.5 for i in range(40)],
+                        "results": []},
+            "track_b": {"track": "B_de_novo", "n_designs": 2,
+                        "designs": []},
+            "ranked": [],
+        },
+    }
+    out = rp.build_report(state)
+    txt = open(out["html"]).read()
+    assert "pLDDT 分布" in txt, "histogram title missing"
+    assert "门槛 35" in txt, "threshold line missing (fast default)"
+
+
+def test_vhh_no_plddt_all_older_state(tmp_path):
+    """R13: states without plddt_all (pre-R13) still render."""
+    state = {
+        "project_dir": str(tmp_path),
+        "options": {"fast": True, "llm_model": "test"},
+        "vhh": {
+            "track_a": {"track": "A_screening", "n_library": 80,
+                        "n_modeled": 80, "n_docked": 5, "results": []},
+            "track_b": {"track": "B_de_novo", "n_designs": 2,
+                        "designs": []},
+            "ranked": [],
+        },
+    }
+    out = rp.build_report(state)
+    txt = open(out["html"]).read()
+    assert "纳米抗体" in txt
+    assert "pLDDT 分布" not in txt
+
+
+def test_md_domain_vs_rest_column(tmp_path):
+    """R13: domain table carries the vs-rest (hinge) column when the
+    summary has domain_rmsd_vs_rest."""
+    state = {
+        "project_dir": str(tmp_path),
+        "options": {"modules": ["md"], "fast": True, "llm_model": "test"},
+        "md": {
+            "system": {"label": "靶点"},
+            "gromacs": {"version": "2023.1", "ff": "amber99sb-ildn"},
+            "ns": 5.0, "reps": 1,
+            "summary": {
+                "rmsd": {"mean": [0.1, 0.2], "std": [0.0, 0.0]},
+                "rg": {"mean": [12.0, 11.9], "std": [0.0, 0.0]},
+                "final_rmsd_mean": 0.2, "final_rg_mean": 11.9,
+                "domains": [{"name": "dom1", "res_start": 1, "res_end": 10,
+                             "n_res": 10}],
+                "domain_rmsd": {"dom1": {"final": 0.05, "mean": 0.04,
+                                         "series": [0.03, 0.05]}},
+                "domain_rmsd_vs_rest": {"dom1": {"final": 0.5,
+                                                 "mean": 0.3,
+                                                 "series": [0.1, 0.5]}},
+            },
+            "replicas": [{"rep": 1, "clusters": {0: 1.0}}],
+        },
+    }
+    out = rp.build_report(state)
+    txt = open(out["html"]).read()
+    assert "末端相对其余 (Å)" in txt, "vs-rest column missing"
+    assert "5.0" in txt  # 0.5 nm -> 5.0 A

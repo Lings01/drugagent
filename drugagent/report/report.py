@@ -280,12 +280,32 @@ def _sec_vhh(state: dict, static: bool) -> str:
     de_novo = [c for c in v.get("ranked", []) if c["source"] == "de_novo"]
     if de_novo and de_novo[0].get("design"):
         viewer = _viewer_pdb(de_novo[0]["design"], "vhh_best")
+    # R13: pLDDT distribution of the modeled library (G9 threshold
+    # visualization) — the pass rate at the gate is visible at a glance
+    hist = ""
+    vals = a.get("plddt_all") or []
+    if vals:
+        from ..config import resolve_defaults
+        import plotly.graph_objects as go
+        d = resolve_defaults(state.get("options") or {})
+        thr = float(d.vhh_plddt_min)
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(x=vals, nbinsx=20,
+                                   marker_color="#4C78A8", name="pLDDT"))
+        fig.add_vline(x=thr, line_dash="dash", line_color="#E45756",
+                      annotation_text=f"门槛 {thr:g}")
+        fig.update_layout(title=(f"VHH 文库 pLDDT 分布 (n={len(vals)}, "
+                                 f"fast/full 门槛 {thr:g})"),
+                          height=300, template="plotly_white",
+                          xaxis_title="pLDDT", yaxis_title="条数")
+        hist = _plot_png_b64(fig) if static else _plot_div(fig)
     return f"""
 <h2>4. 纳米抗体 (VHH) 筛选 + 设计 <span class="badge">Module D</span></h2>
 <div class="card">
 Track A (文库筛选): 文库 {a.get('n_library')} → 建模 {a.get('n_modeled')} → 对接 {a.get('n_docked')}<br>
 Track B (de novo 设计): {b.get('n_designs')} 个 (VHH scaffold 约束)
 </div>
+{hist}
 {llm_note}
 {_table(['#', '来源', 'pLDDT', '对接打分', 'CDR片段', '界面pLDDT', '综合分'], rows)}
 {viewer}
@@ -316,7 +336,8 @@ def _sec_md(state: dict, static: bool) -> str:
                                      y=[v * 10.0 for v in s[k]["mean"]],
                                      name=f"{k.replace('rmsd_', '')} RMSD (Å, 相对最大链)",
                                      mode="lines"))
-    # R12/R1: per-domain RMSD (each domain self-fit; nm -> A)
+    # R12/R1: per-domain RMSD (each domain self-fit; nm -> A) +
+    # R13/R1-v2: domain vs rest of protein (hinge/allosteric signal)
     dom_rmsd = s.get("domain_rmsd") or {}
     if dom_rmsd:
         for name in sorted(dom_rmsd):
@@ -325,6 +346,15 @@ def _sec_md(state: dict, static: bool) -> str:
                 fig.add_trace(go.Scatter(
                     x=list(range(len(ser))), y=[v * 10.0 for v in ser],
                     name=f"结构域 {name} 自拟合 RMSD (Å)", mode="lines"))
+    dom_vs = s.get("domain_rmsd_vs_rest") or {}
+    if dom_vs:
+        for name in sorted(dom_vs):
+            ser = dom_vs[name].get("series") or []
+            if ser:
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(ser))), y=[v * 10.0 for v in ser],
+                    name=f"结构域 {name} 相对其余 (Å)", mode="lines",
+                    line={"dash": "dot"}))
     fig.update_layout(title=f"MD 稳定性 ({m.get('reps', 1)} 次重复平均)",
                       height=320, template="plotly_white")
     chart = _plot_png_b64(fig) if static else _plot_div(fig)
@@ -388,19 +418,23 @@ def _sec_md(state: dict, static: bool) -> str:
                           for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
         clus.append("均值: " + parts)
     clus_text = chr(10).join(clus) if clus else "无聚类数据"
-    # R12/R1: structural-domain table (residue ranges + RMSD in A)
+    # R12/R1: structural-domain table (residue ranges + RMSD in A);
+    # R13: + vs-rest (hinge) column
     dom_rows = []
+    dom_vs = s.get("domain_rmsd_vs_rest") or {}
     for d in s.get("domains") or []:
         st = (s.get("domain_rmsd") or {}).get(d["name"]) or {}
+        vs = dom_vs.get(d["name"]) or {}
         dom_rows.append([
             d.get("name", "?"),
             f"{d.get('res_start', '?')}-{d.get('res_end', '?')}",
             d.get("n_res", "?"),
             f"{st['final'] * 10:.1f}" if st.get("final") is not None else "-",
             f"{st['mean'] * 10:.1f}" if st.get("mean") is not None else "-",
+            f"{vs['final'] * 10:.1f}" if vs.get("final") is not None else "-",
         ])
-    dom_html = (_table(["结构域", "残基", "残基数", "末端 RMSD (Å)",
-                        "均值 RMSD (Å)"], dom_rows)
+    dom_html = (_table(["结构域", "残基", "残基数", "末端自拟合 (Å)",
+                        "均值自拟合 (Å)", "末端相对其余 (Å)"], dom_rows)
                 if dom_rows else "")
     return f"""
 <h2>5. MD 模拟 <span class="badge">Module E</span></h2>

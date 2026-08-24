@@ -2506,21 +2506,73 @@ def find_ss_domains(codes: np.ndarray, min_res: int = 8) -> list[dict]:
     return out
 
 
-def _kabsch_rmsd(mobile: np.ndarray, ref: np.ndarray) -> float:
-    """RMSD (nm) after optimally rotating+translating `mobile` onto
-    `ref` (both (n, 3), same atom order)."""
+def _kabsch_transform(mobile: np.ndarray, ref: np.ndarray) -> tuple:
+    """Optimal rigid transform fitting `mobile` onto `ref` (both (n, 3),
+    same atom order). Row-vector convention: returns (M, t) with
+    mobile @ M + t ~= ref. M = U D Vt for the SVD of H = A.T @ B
+    (verified against brute-force SO(3) search; a transposed variant
+    fails on rank-deficient point clouds)."""
     cm, cr = mobile.mean(axis=0), ref.mean(axis=0)
     A, B = mobile - cm, ref - cr
     H = A.T @ B
     U, _, Vt = np.linalg.svd(H)
     D = np.diag([1.0, 1.0, float(np.sign(np.linalg.det(U @ Vt)))])
-    # both A and B are centered -> compare in the centered frame (adding
-    # cr back here would offset the RMSD by the reference centroid).
-    # R = U D Vt (H = A.T @ B convention; verified against brute-force
-    # SO(3) search — the transposed variant silently overfits collinear
-    # clouds yet fails on well-conditioned ones)
-    fitted = A @ (U @ D @ Vt)
-    return float(np.sqrt(np.mean(np.sum((fitted - B) ** 2, axis=1))))
+    M = U @ D @ Vt
+    t = cr - cm @ M
+    return M, t
+
+
+def _kabsch_rmsd(mobile: np.ndarray, ref: np.ndarray) -> float:
+    """RMSD (nm) after optimally rotating+translating `mobile` onto
+    `ref` (both (n, 3), same atom order)."""
+    M, t = _kabsch_transform(mobile, ref)
+    fitted = mobile @ M + t
+    return float(np.sqrt(np.mean(np.sum((fitted - ref) ** 2, axis=1))))
+
+
+def domain_vs_rest_rmsd_series(coords: np.ndarray,
+                               domains: list[dict]) -> dict[str, list[float]]:
+    """R13/R1-v2: per-frame RMSD of each domain measured after fitting
+    the REST of the protein (all other CA slots) to its frame-0
+    structure.
+
+    The self-fit series (domain_rmsd_series) removes ALL rigid motion,
+    so it cannot see a domain swinging like a hinge while the rest of
+    the protein stays put. Here the rest is the reference: a domain
+    with near-zero self-fit but growing vs-rest RMSD is a rigid-body
+    hinge/allosteric motion. NaN where <3 rest or <3 domain CA atoms
+    are finite. coords: (F, R, 4, 3), role 1 = CA."""
+    out: dict[str, list[float]] = {}
+    F, R = coords.shape[:2]
+    ca = coords[:, :, 1, :]
+    for d in domains:
+        s, e = d["res_start"] - 1, d["res_end"]
+        dom_ref = ca[0, s:e]
+        rest_sel = np.ones(R, dtype=bool)
+        rest_sel[s:e] = False
+        rest_ref = ca[0, rest_sel]
+        ok_rest = np.isfinite(rest_ref[:, 0])
+        if int(ok_rest.sum()) < 3:
+            continue
+        series: list[float] = []
+        for f in range(F):
+            dom = ca[f, s:e]
+            rest_f = ca[f, rest_sel]
+            m_rest = np.isfinite(rest_f[:, 0]) & ok_rest
+            m_dom = np.isfinite(dom[:, 0])
+            if int(m_rest.sum()) < 3 or int(m_dom.sum()) < 3:
+                series.append(float("nan"))
+                continue
+            m_ref = m_dom & np.isfinite(dom_ref[:, 0])
+            if int(m_ref.sum()) < 3:
+                series.append(float("nan"))
+                continue
+            Mm, tm = _kabsch_transform(rest_f[m_rest], rest_ref[ok_rest])
+            moved = dom[m_ref] @ Mm + tm
+            series.append(float(np.sqrt(np.mean(
+                np.sum((moved - dom_ref[m_ref]) ** 2, axis=1)))))
+        out[d["name"]] = series
+    return out
 
 
 def domain_rmsd_series(coords: np.ndarray,
@@ -2574,11 +2626,14 @@ def analyze_ss(tpr: Path, xtc: Path) -> dict:
     # pass)
     domains = find_ss_domains(codes[0])
     domain_rmsd = domain_rmsd_series(coords, domains) if domains else {}
+    domain_rmsd_vs_rest = (domain_vs_rest_rmsd_series(coords, domains)
+                           if domains else {})
     return {"ss_frac": structured.tolist(),
             "ss_stable": stable.tolist(),
             "n_frames": int(F), "n_residues": int(R),
             "domains": domains,
-            "domain_rmsd": domain_rmsd}
+            "domain_rmsd": domain_rmsd,
+            "domain_rmsd_vs_rest": domain_rmsd_vs_rest}
 
 
 def flexible_regions(rmsf_profile: list[float], *,
@@ -2736,13 +2791,38 @@ def interpret_stability(summary: dict) -> list[str]:
                 f"{worst['final'] * 10:.1f} Å, 均值 "
                 f"{worst['mean'] * 10:.1f} Å) — 该短结构段内部形变显著 "
                 "(环区/不稳定二级结构, 无配体稳定); 若邻近结合口袋, 建议"
-                "柔性靶点工作流; 铰链式刚体域运动需域-其余蛋白相对 "
-                "RMSD 进一步确认 (R1-v2)")
+                "柔性靶点工作流")
         elif f is not None and f > 0.30 and all(
                 v["final"] < 0.30 for v in dom_rmsd.values()):
             notes.append(
                 f"各结构域内部均稳定 (最大末端 RMSD {worst['final'] * 10:.1f} "
                 "Å < 3.0 Å) — 高整体 RMSD 主要来自域间相对运动而非域内展开")
+    # 9) R13/R1-v2: domain vs rest of protein (rest fit to frame 0, domain
+    # measured against it -> rigid-body hinge/allosteric motion that the
+    # self-fit series removes by construction)
+    dom_vs = summary.get("domain_rmsd_vs_rest") or {}
+    if dom_vs:
+        doms = summary.get("domains") or []
+        worst_v = max(dom_vs, key=lambda k: dom_vs[k]["final"])
+        dd = next((d for d in doms if d.get("name") == worst_v), {})
+        selfit = (summary.get("domain_rmsd") or {}).get(worst_v, {})
+        if dom_vs[worst_v]["final"] > 0.40:
+            if selfit.get("final", 1.0) < 0.30:
+                notes.append(
+                    f"结构域 {worst_v} (残基 {dd.get('res_start')}-"
+                    f"{dd.get('res_end')}) 相对其余蛋白呈大尺度刚体运动 "
+                    f"(末端 {dom_vs[worst_v]['final'] * 10:.1f} Å, 自身"
+                    "内部稳定 < 3.0 Å) — 铰链/变构结构域特征; 若其连接"
+                    "结合口袋与远端功能位点, 提示变构调控可能, 建议多构象"
+                    "柔性靶点工作流")
+            else:
+                notes.append(
+                    f"结构域 {worst_v} (残基 {dd.get('res_start')}-"
+                    f"{dd.get('res_end')}) 相对其余蛋白有显著位移 (末端 "
+                    f"{dom_vs[worst_v]['final'] * 10:.1f} Å, 自身内部 "
+                    f"{selfit.get('final', 0.0) * 10:.1f} Å) — 域运动以"
+                    "构象重排为主 (柔性/半刚性域); 若其连接结合口袋与远端"
+                    "功能位点, 仍提示变构调控可能")
     return notes
 
 
@@ -2922,6 +3002,7 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
             a["ss_stable"] = ss["ss_stable"]
             a["domains"] = ss.get("domains") or []
             a["domain_rmsd"] = ss.get("domain_rmsd") or {}
+            a["domain_rmsd_vs_rest"] = ss.get("domain_rmsd_vs_rest") or {}
         except Exception as e:  # noqa: BLE001 - diagnostics must not kill MD
             logger.warning(f"replica {r['rep']} SS analysis failed: {e}")
         per_rep.append(a)
@@ -2972,24 +3053,31 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
         for d in r.get("domains") or []:
             if d["name"] not in dom_names:
                 dom_names.append(d["name"])
-    domain_summary = {}
-    for name in dom_names:
-        series = [np.array(r["domain_rmsd"][name], dtype=float)
-                  for r in per_rep if r.get("domain_rmsd")
-                  and name in r["domain_rmsd"] and r["domain_rmsd"][name]]
-        if series:
-            L = min(len(s) for s in series)
-            arr = np.stack([s[:L] for s in series])
-            arr = np.nan_to_num(arr, nan=0.0)
-            domain_summary[name] = {
-                "final": round(float(arr[:, -1].mean()), 4),
-                "mean": round(float(arr.mean()), 4),
-                "series": np.round(arr.mean(axis=0), 4).tolist(),
-            }
+    def _agg(field: str) -> dict:
+        out = {}
+        for name in dom_names:
+            series = [np.array(r[field][name], dtype=float)
+                      for r in per_rep if r.get(field)
+                      and name in r[field] and r[field][name]]
+            if series:
+                L = min(len(s) for s in series)
+                arr = np.stack([s[:L] for s in series])
+                arr = np.nan_to_num(arr, nan=0.0)
+                out[name] = {
+                    "final": round(float(arr[:, -1].mean()), 4),
+                    "mean": round(float(arr.mean()), 4),
+                    "series": np.round(arr.mean(axis=0), 4).tolist(),
+                }
+        return out
+
+    domain_summary = _agg("domain_rmsd")
+    vs_rest_summary = _agg("domain_rmsd_vs_rest")
     if domain_summary:
         summary["domains"] = next(
             (r["domains"] for r in per_rep if r.get("domains")), [])
         summary["domain_rmsd"] = domain_summary
+        if vs_rest_summary:
+            summary["domain_rmsd_vs_rest"] = vs_rest_summary
     # per-chain RMSD (mean across replicas + mean final value)
     for key in sorted({k for r in per_rep for k in r
                        if k.startswith("rmsd_chain") and k != "rmsd"}):
