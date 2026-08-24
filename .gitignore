@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+env/
+data/
+conda_pkgs/
+pip_cache/
+projects/
+logs/
+.pytest_cache/
+\#cluster.log*
+\#posre_*
+mdout.mdp
+*.itp.1*
+
+\#*

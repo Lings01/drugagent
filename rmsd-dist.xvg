@@ -1,0 +1,118 @@
+# This file was created Mon Aug 24 07:04:01 2026
+# Created by:
+#                     :-) GROMACS - gmx cluster, 2023.1 (-:
+# 
+# Executable:   /home/data/lrs/drug/drugagent/data/tools/gromacs/bin/gmx
+# Data prefix:  /home/data/lrs/drug/drugagent/data/tools/gromacs
+# Working dir:  /home/data/lrs/drug/drugagent
+# Command line:
+#   gmx cluster -s /home/data/lrs/drug/drugagent/data/fixtures/_ptmp/test_cluster_mean_pdb0/md/md_rep1/md.tpr -f /home/data/lrs/drug/drugagent/data/fixtures/_ptmp/test_cluster_mean_pdb0/md/md_rep1/md.xtc -method gromos -cutoff 1.2 -cl /home/data/lrs/drug/drugagent/data/fixtures/_ptmp/test_cluster_mean_pdb0/md/analysis/clusters_r1 -clid /home/data/lrs/drug/drugagent/data/fixtures/_ptmp/test_cluster_mean_pdb0/md/analysis/cluster_idx_r1.xvg
+# gmx cluster is part of G R O M A C S:
+#
+# Green Red Orange Magenta Azure Cyan Skyblue
+#
+@    title "RMS Distribution"
+@    xaxis  label "RMS (nm)"
+@    yaxis  label "counts"
+@TYPE xy
+         0           0
+0.00197433           0
+0.00394865           0
+0.00592298           0
+0.00789731           0
+0.00987163           0
+  0.011846           0
+ 0.0138203           0
+ 0.0157946           0
+ 0.0177689           0
+ 0.0197433           0
+ 0.0217176           0
+ 0.0236919           0
+ 0.0256662           0
+ 0.0276406           0
+ 0.0296149           0
+ 0.0315892           0
+ 0.0335636           0
+ 0.0355379           0
+ 0.0375122           0
+ 0.0394865           0
+ 0.0414609           0
+ 0.0434352           0
+ 0.0454095           0
+ 0.0473838           0
+ 0.0493582           0
+ 0.0513325           0
+ 0.0533068           0
+ 0.0552811           0
+ 0.0572555           0
+ 0.0592298           0
+ 0.0612041           0
+ 0.0631784           0
+ 0.0651528           0
+ 0.0671271           0
+ 0.0691014           0
+ 0.0710758           0
+ 0.0730501           0
+ 0.0750244           0
+ 0.0769987           0
+ 0.0789731           0
+ 0.0809474           1
+ 0.0829217           1
+  0.084896           2
+ 0.0868704           0
+ 0.0888447           0
+  0.090819           1
+ 0.0927933           0
+ 0.0947677           0
+  0.096742           0
+ 0.0987163           2
+  0.100691           1
+  0.102665           1
+  0.104639           1
+  0.106614           1
+  0.108588           3
+  0.110562           1
+  0.112537           1
+  0.114511           4
+  0.116485           0
+   0.11846           1
+  0.120434           2
+  0.122408           2
+  0.124383           1
+  0.126357           3
+  0.128331           1
+  0.130306           2
+   0.13228           1
+  0.134254           0
+  0.136229           1
+  0.138203           0
+  0.140177           4
+  0.142152           0
+  0.144126           0
+    0.1461           0
+  0.148074           0
+  0.150049           1
+  0.152023           3
+  0.153997           1
+  0.155972           1
+  0.157946           0
+   0.15992           2
+  0.161895           1
+  0.163869           2
+  0.165843           1
+  0.167818           1
+  0.169792           0
+  0.171766           1
+  0.173741           1
+  0.175715           0
+  0.177689           1
+  0.179664           0
+  0.181638           0
+  0.183612           0
+  0.185587           0
+  0.187561           0
+  0.189535           0
+   0.19151           0
+  0.193484           0
+  0.195458           0
+  0.197433           1
