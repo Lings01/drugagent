@@ -94,7 +94,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 │   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
 ├── DESIGN.md                         # 2.0 架构设计
 ├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (142 快测 + 15 slow e2e)
+├── tests/                            # pytest 套件 (147 快测 + 15 slow e2e)
 └── logs/                             # 构建/运行日志
 ```
 
@@ -109,7 +109,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 ## 测试
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (142 用例)
+env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (147 用例)
 env/bin/python -m pytest tests/ -q                   # 含 slow（需 vina/GROMACS/RF 权重）
 env/bin/python -m pytest tests/test_mdsim.py -m slow -q \    --basetemp=$PWD/data/fixtures/_ptmp             # MD e2e 建议本地盘 basetemp
 ```
