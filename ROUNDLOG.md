@@ -43,11 +43,15 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
 独立 e2e 验证，单列一轮更稳。
 
 ### 验证
-- [x] 快速套件全绿：181 通过（新增 34：stages 20 / vhh 4+1+4+1 / r5 1+1 / cli 2+1+1）
+- [x] 快速套件全绿：182 通过（新增 35：stages 20 / vhh 10 / r5 1+1 / cli 3 / report 1）
 - [x] 文档：README（模块 D 行/两层幂等/status/VHH 对接与 pLDDT 门槛/库回退）
 - [x] G10 基准（scripts/bench_vhh_dock.py，vhh_30 773 原子 @1HVI，exh=1）
-- [ ] e2e：projects/r10_e2e 收尾验证（上轮遗留；本轮监控中：track A 完成
-  （1 条柔性对接 76 min）→ track B 2 设计完成 → MD 阶段进行中）
+- [x] e2e：projects/r10_e2e 收尾验证（上轮遗留）——13:26 success，6 阶段
+  全绿（track A 1 柔性对接 76 min → track B 2 设计 → MD 5ns×3 → 报告）。
+  报告核对：柔性区 ✓ / 解读 ✓ / 回退库标注 "chembl35_small (fallback for
+  dtp)" ✓ / 无 apo 误报 ✓
+- [x] G8 幂等 e2e：同命令重跑 → 6 阶段全部 maybe_reuse 复用，~2 s 完成
+  （原跑 5.3 h）
 
 ### 结果
 1. **G8 阶段级幂等**：`agent/stages.py` 定义 6 阶段完成判据 + 缓存摘要；
@@ -90,6 +94,17 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
    实测 r10_e2e 输出正确（含 dtp 回退标注 + 早期 dtp 失败记录）。
 6. **pdbbind**：138 字节文件 = nginx 404 页（两 URL 均 404，下载改注册制
    download.php）。setup 校验 + 软失败；坏件已删。
+7. **r10_e2e 收尾验证**：13:26 success。MD 5ns×3（final RMSD 0.9 nm、
+   自拟合 RMSD 各链 < 1.8 Å、二级结构 66%→69%、cluster 1 占 97.8-100%）。
+   报告核对通过（柔性区/解读/回退库标注/无 apo 误报）。**G8 幂等 e2e**：
+   同命令重跑 ~2 s 完成，6 阶段全复用。
+8. **报告两处修复（收尾验证时发现）**：
+   - 聚类段读错数据源（`m.replicas` 运行记录无 clusters 键 → 渲染
+     `rep1: {}`）→ 改读 `summary.replicas`，百分比化展示（rep1: cluster 1:
+     97.8%…）。回归测试 test_md_cluster_text_uses_summary_replicas。
+   - 解读措辞矛盾（"平均 RMSF 偏高" 与 "各残基 RMSF 均低于阈值" 同屏）
+     → 柔性区判据是"≥5 连续残基 ≥2×均值"，个别高值残基不构成"区"；
+     文案改为 "无明显连续柔性区…个别高 RMSF 残基见上条"。
 
 ### 反思 / 下轮缺口（按优先级）
 1. **G10 v3 片段对接打磨**：frag0（257 原子）仍偏大（~6 min），可加
@@ -99,13 +114,13 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
    `run_vhh(force=true)` 或新项目验证 CDR 对接全链路。
 2. **R1 真·结构域 RMSD**：DSSP 域边界/NMDYN 式动态域，`gmx_analyze
    kind="domain"`（分链+柔性区已覆盖大部分需求，收尾项）。
-3. **G8 收尾验证**：r10_e2e 跑完后重跑同命令 → 全阶段秒级复用
-   （本轮已留验证入口）。
+3. **G8 收尾验证 ✅（本轮完成）**：同命令重跑 ~2 s、6 阶段全复用。
+   剩余：`drugagent rerun --stage X`（force 的 CLI 化）——易用性收尾。
 4. DTP 下载重试（dtpbase.org 偶活）；pdbbind 注册后手动补库。
-5. 易用性：`drugagent rerun --stage X`（force 的 CLI 化）；
-   vhh_screen 的 pLDDT 分布直方图进报告（G9 门槛选择可视化）。
-6. 报告检查（上轮遗留）：r10_e2e 报告里柔性区/interpretation/回退库
-   标注核对（e2e 收尾时做）。
+5. 易用性：vhh_screen 的 pLDDT 分布直方图进报告（G9 门槛选择可视化）；
+   CDR 片段对接在报告里展示各片段分（fragment_scores 目前只在 state）。
+6. **报告检查 ✅（本轮完成）**：柔性区/interpretation/回退库标注全部
+   核对通过（并修了聚类数据源 + 措辞矛盾两处）。
 
 ## 第 10 轮
 

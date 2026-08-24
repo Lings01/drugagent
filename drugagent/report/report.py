@@ -356,10 +356,21 @@ def _sec_md(state: dict, static: bool) -> str:
         interp_html = (f"<div class='card'><b>柔性解读 (规则引擎自动判断)</b>"
                        f"<ul>{lis}</ul></div>")
     sysinfo = m.get("system", {})
+    # R11: per-replica cluster populations live in summary.replicas (the
+    # run records in m.replicas carry only rep/dir/wall_h)
     clus = []
-    for r in m.get("replicas", []):
-        clus.append(f"rep{r['rep']}: {r.get('clusters', {})}")
-    clus_text = chr(10).join(clus)
+    per_rep = s.get("replicas") or []
+    for r in per_rep:
+        c = r.get("clusters") or {}
+        parts = ", ".join(f"cluster {k}: {v * 100:.1f}%"
+                          for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
+        clus.append(f"rep{r.get('rep', '?')}: " + (parts or "无聚类数据"))
+    if not per_rep and s.get("clusters"):
+        c = s["clusters"]
+        parts = ", ".join(f"cluster {k}: {v * 100:.1f}%"
+                          for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
+        clus.append("均值: " + parts)
+    clus_text = chr(10).join(clus) if clus else "无聚类数据"
     return f"""
 <h2>5. MD 模拟 <span class="badge">Module E</span></h2>
 <div class="card">

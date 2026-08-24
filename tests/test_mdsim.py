@@ -1269,7 +1269,9 @@ def test_flexible_regions_none_note():
     text = " ".join(md.interpret_stability(
         {"final_rmsd_mean": 0.1, "rmsf_profile_mean": p,
          "flexible_regions": []}))
-    assert "无明显柔性区" in text
+    # R11: wording must not contradict the single-residue high-RMSF note
+    assert "无明显连续柔性区" in text
+    assert "各残基 RMSF 均低于阈值" not in text
 
 
 def test_flexible_regions_ignores_short_and_nan():

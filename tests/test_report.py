@@ -174,3 +174,41 @@ def test_report_flexible_regions(tmp_path):
     txt = open(out["html"]).read()
     assert "柔性区" in txt
     assert "100" in txt and "115" in txt
+
+
+def test_md_cluster_text_uses_summary_replicas(tmp_path):
+    """R11: per-replica cluster populations come from summary.replicas
+    (run records m.replicas have no clusters key -> used to render {})."""
+    state = {
+        "project_dir": str(tmp_path),
+        "options": {"modules": ["md"], "fast": True, "llm_model": "test"},
+        "target_prep": {"clean_pdb": None,
+                        "completeness": {"chains": {"A": 100},
+                                         "ligands": [], "n_atoms": 500,
+                                         "multimer": False},
+                        "pocket": {"method": "ligand_centroid",
+                                   "center": [0, 0, 0], "xsize": 12,
+                                   "ysize": 12, "zsize": 12}},
+        "md": {
+            "ns": 5.0, "reps": 2,
+            "gromacs": {"version": "2023.1", "ff": "amino96sbilina"},
+            "system": {"label": "test"},
+            "replicas": [{"rep": 1, "dir": "d1", "wall_h": 1.0},
+                         {"rep": 2, "dir": "d2", "wall_h": 1.0}],
+            "summary": {
+                "final_rmsd_mean": 0.1, "final_rg_mean": 2.0,
+                "replicas": [
+                    {"rep": 1, "clusters": {"1": 0.978, "2": 0.022}},
+                    {"rep": 2, "clusters": {"1": 0.5, "2": 0.5}},
+                ],
+                "clusters": {"1": 0.739, "2": 0.261},
+            },
+        },
+    }
+    out = rp.build_report(state)
+    txt = open(out["html"]).read()
+    assert "cluster 1: 97.8%" in txt
+    assert "rep2: cluster 1: 50.0%" in txt
+    # no empty-dict rendering
+    import re
+    assert not re.search(r"rep\d+: \{\}", txt)

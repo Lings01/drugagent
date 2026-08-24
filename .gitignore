@@ -13,3 +13,7 @@ mdout.mdp
 *.itp.1*
 
 \#*
+# GROMACS writes these to cwd during cluster steps (stray artifacts)
+/cluster.log
+/rmsd-clust.xpm
+/rmsd-dist.xvg

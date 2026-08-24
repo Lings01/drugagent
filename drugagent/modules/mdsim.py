@@ -2575,8 +2575,11 @@ def interpret_stability(summary: dict) -> list[str]:
                          "若位于结合口袋内或其邻近, 建议走柔性靶点工作流 "
                          "(构象选择 + 柔性对接, dock_conformer_set)")
         else:
-            notes.append("无明显柔性区 (各残基 RMSF 均低于阈值) — "
-                         "整体构象刚性较好")
+            # R11: wording must not contradict the single-residue note —
+            # "no region" means no run >= min_res residues above the
+            # 2x-mean threshold; isolated hot spots may still exist.
+            notes.append("无明显连续柔性区 (无 ≥5 连续残基的 RMSF 高值区) — "
+                         "构象整体刚性较好; 个别高 RMSF 残基见上条")
     # 7) R11/R5: auto criterion for the flexible-target workflow — an apo
     # system (no bound ligand) whose RMSF is globally elevated means the
     # crystal structure is a poor single representative: recommend a short
