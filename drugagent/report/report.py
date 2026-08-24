@@ -257,11 +257,19 @@ def _sec_vhh(state: dict, static: bool) -> str:
     b = v.get("track_b", {})
     rows = []
     for i, c in enumerate(v.get("ranked", [])[:15]):
+        # R12/G10-v3: CDR-fragment docking details (fast mode)
+        fr = ""
+        if c.get("n_fragments"):
+            fs = c.get("fragment_scores") or []
+            best = min(fs) if fs else None
+            fr = f"{c['n_fragments']} 片段" + (
+                f", 最佳 {best:.2g}" if best is not None else "")
         rows.append([
             i + 1, c["source"],
             f"{c.get('plddt', float('nan')):.1f}" if c.get("plddt") else "-",
             f"{c.get('docking_score', float('nan')):.2f}"
             if c.get("docking_score") is not None else "-",
+            fr,
             f"{c.get('interface_plddt_mean', float('nan')):.1f}"
             if c.get("interface_plddt_mean") else "-",
             f"{c.get('composite_score', float('nan')):.3f}",
@@ -279,7 +287,7 @@ Track A (文库筛选): 文库 {a.get('n_library')} → 建模 {a.get('n_modeled
 Track B (de novo 设计): {b.get('n_designs')} 个 (VHH scaffold 约束)
 </div>
 {llm_note}
-{_table(['#', '来源', 'pLDDT', '对接打分', '界面pLDDT', '综合分'], rows)}
+{_table(['#', '来源', 'pLDDT', '对接打分', 'CDR片段', '界面pLDDT', '综合分'], rows)}
 {viewer}
 """
 
@@ -308,6 +316,15 @@ def _sec_md(state: dict, static: bool) -> str:
                                      y=[v * 10.0 for v in s[k]["mean"]],
                                      name=f"{k.replace('rmsd_', '')} RMSD (Å, 相对最大链)",
                                      mode="lines"))
+    # R12/R1: per-domain RMSD (each domain self-fit; nm -> A)
+    dom_rmsd = s.get("domain_rmsd") or {}
+    if dom_rmsd:
+        for name in sorted(dom_rmsd):
+            ser = dom_rmsd[name].get("series") or []
+            if ser:
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(ser))), y=[v * 10.0 for v in ser],
+                    name=f"结构域 {name} 自拟合 RMSD (Å)", mode="lines"))
     fig.update_layout(title=f"MD 稳定性 ({m.get('reps', 1)} 次重复平均)",
                       height=320, template="plotly_white")
     chart = _plot_png_b64(fig) if static else _plot_div(fig)
@@ -371,6 +388,20 @@ def _sec_md(state: dict, static: bool) -> str:
                           for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
         clus.append("均值: " + parts)
     clus_text = chr(10).join(clus) if clus else "无聚类数据"
+    # R12/R1: structural-domain table (residue ranges + RMSD in A)
+    dom_rows = []
+    for d in s.get("domains") or []:
+        st = (s.get("domain_rmsd") or {}).get(d["name"]) or {}
+        dom_rows.append([
+            d.get("name", "?"),
+            f"{d.get('res_start', '?')}-{d.get('res_end', '?')}",
+            d.get("n_res", "?"),
+            f"{st['final'] * 10:.1f}" if st.get("final") is not None else "-",
+            f"{st['mean'] * 10:.1f}" if st.get("mean") is not None else "-",
+        ])
+    dom_html = (_table(["结构域", "残基", "残基数", "末端 RMSD (Å)",
+                        "均值 RMSD (Å)"], dom_rows)
+                if dom_rows else "")
     return f"""
 <h2>5. MD 模拟 <span class="badge">Module E</span></h2>
 <div class="card">
@@ -383,6 +414,7 @@ def _sec_md(state: dict, static: bool) -> str:
 {chart2}
 {chart3}
 {interp_html}
+{dom_html}
 <h3>聚类 (gmx cluster / GromOS, 截断 1.5 nm)</h3>
 <pre>{_esc(clus_text)}</pre>
 """

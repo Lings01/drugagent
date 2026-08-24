@@ -258,6 +258,15 @@ def test_analyze_ss_smoke():
     frac = ss["ss_frac"]
     # a folded HIV-PR dimer + binder keeps > 40% structured backbone
     assert min(frac) > 0.3, f"SS fraction too low: {min(frac):.2f}"
+    # R12/R1: SS domains + per-domain self-fit RMSD (PBC-unwrapped
+    # trajectory) — an 8+ residue domain cannot internally distort by
+    # more than its own span; 3 nm is a generous physical bound
+    # (pre-unwrap this showed 15+ nm phantom values on 1HVI)
+    assert "domains" in ss and "domain_rmsd" in ss
+    for d in ss["domains"]:
+        ser = ss["domain_rmsd"][d["name"]]
+        assert len(ser) == ss["n_frames"]
+        assert max(ser) < 3.0, f"{d['name']} max {max(ser):.2f} nm"
     assert max(ss["ss_stable"]) > 0.9
 
 
@@ -1279,3 +1288,140 @@ def test_flexible_regions_ignores_short_and_nan():
     p[40] = float("nan")
     regs = md.flexible_regions(p)
     assert regs == []
+
+
+# --------------------------------------------------------------------------- #
+# R12/R1: SS-domain RMSD (true structural-domain RMSD)
+# --------------------------------------------------------------------------- #
+def test_find_ss_domains():
+    import numpy as np
+    from drugagent.modules.mdsim import find_ss_domains
+    # 30 res: structured 1-10, loop 11-15, structured 16-25, loop 26-30
+    codes = np.zeros(30, dtype=int)
+    codes[0:10] = 1   # H
+    codes[15:25] = 4  # E
+    doms = find_ss_domains(codes)
+    assert len(doms) == 2
+    assert doms[0]["res_start"] == 1 and doms[0]["res_end"] == 10
+    assert doms[1]["res_start"] == 16 and doms[1]["res_end"] == 25
+    assert doms[0]["name"] == "dom1" and doms[1]["name"] == "dom2"
+    # short structured runs (< min_res=8) are not domains
+    codes2 = np.zeros(30, dtype=int)
+    codes2[5:8] = 1
+    assert find_ss_domains(codes2) == []
+    # min_res override
+    doms3 = find_ss_domains(codes2, min_res=3)
+    assert len(doms3) == 1 and doms3[0]["n_res"] == 3
+
+
+def _rigid_block(n_res, offset, t=0.0, rot_axis=(0, 1, 0)):
+    """n_res CA positions: a rigid planar block at z=offset; optional
+    rotation about rot_axis by t radians (applied around block center)."""
+    import numpy as np
+    pts = np.array([[i, 0.0, 0.0] for i in range(n_res)], dtype=float)
+    pts[:, 0] += 0.0  # helix-like x-spacing
+    c = pts.mean(axis=0)
+    pts = pts - c
+    ax = np.asarray(rot_axis, dtype=float)
+    ax = ax / np.linalg.norm(ax)
+    K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]],
+                  [-ax[1], ax[0], 0]])
+    R = np.eye(3) + np.sin(t) * K + (1 - np.cos(t)) * (K @ K)
+    return (pts @ R.T) + c + np.array([0.0, 0.0, offset])
+
+
+def test_domain_rmsd_series_bending_domain():
+    """dom1 static (RMSD ~ 0); dom2's far half bends -> internal
+    distortion grows with the bend angle. A pure rigid-body rotation of
+    the whole domain is absorbed by the self-fit (RMSD stays ~0) —
+    that is the whole point of the self-fit convention."""
+    import numpy as np
+    from drugagent.modules.mdsim import domain_rmsd_series
+    n1, n2 = 10, 8
+    F = 5
+    ts = np.linspace(0.0, 1.0, F)  # up to ~57 deg bend
+    frames = []
+    for t in ts:
+        a = _rigid_block(n1, 0.0, t=0.0)          # static domain
+        b = _rigid_block(n2, 12.0, t=0.0)
+        # bend the far half (last 4 residues) about the domain center
+        pivot = b.mean(axis=0)
+        far = b[4:] - pivot
+        ax = np.array([0.0, 1.0, 0.0])
+        K = np.array([[0.0, -ax[2], ax[1]], [ax[2], 0.0, -ax[0]],
+                      [-ax[1], ax[0], 0.0]])
+        Rb = (np.eye(3) + np.sin(t) * K
+              + (1 - np.cos(t)) * (K @ K))
+        b[4:] = far @ Rb.T + pivot
+        # (F, R, 4, 3) with role 1 = CA; other roles NaN
+        fr = np.full((n1 + n2, 4, 3), np.nan)
+        fr[:n1, 1] = a
+        fr[n1:, 1] = b
+        frames.append(fr)
+    coords = np.stack(frames)
+    domains = [{"name": "dom1", "res_start": 1, "res_end": n1, "n_res": n1},
+               {"name": "dom2", "res_start": n1 + 1, "res_end": n1 + n2,
+                "n_res": n2}]
+    out = domain_rmsd_series(coords, domains)
+    assert set(out) == {"dom1", "dom2"}
+    assert len(out["dom1"]) == F and len(out["dom2"]) == F
+    # static domain stays near zero (fit noise only)
+    assert max(out["dom1"]) < 1e-6
+    # bending domain: RMSD grows with the bend angle
+    assert out["dom2"][-1] > 0.3
+    assert out["dom2"][-1] > out["dom2"][0] + 0.2
+    assert out["dom2"][-1] > out["dom2"][3] - 1e-9
+
+
+def test_domain_rmsd_rigid_rotation_absorbed():
+    """A whole-domain rigid rotation (any axis) is absorbed by the
+    self-fit -> RMSD ~ 0 for all frames."""
+    import numpy as np
+    from drugagent.modules.mdsim import domain_rmsd_series
+    n = 8
+    F = 4
+    frames = []
+    for i, t in enumerate(np.linspace(0.0, 1.0, F)):
+        b = _rigid_block(n, 5.0, t=t)
+        fr = np.full((n, 4, 3), np.nan)
+        fr[:, 1] = b
+        frames.append(fr)
+    coords = np.stack(frames)
+    out = domain_rmsd_series(coords, [{"name": "dom1", "res_start": 1,
+                                       "res_end": n, "n_res": n}])
+    assert max(out["dom1"]) < 1e-6
+
+
+def test_interpret_domain_motion_notes():
+    """R12/R1: domain RMSD drives two distinct interpretation notes."""
+    base = {"final_rmsd_mean": 0.35,
+            "domains": [{"name": "dom1", "res_start": 1, "res_end": 40,
+                         "n_res": 40}]}
+    # large domain motion -> hinge note
+    text = " ".join(md.interpret_stability(
+        dict(base, domain_rmsd={"dom1": {"final": 0.55, "mean": 0.4,
+                                         "series": []}})))
+    assert "结构域 dom1" in text and "构象漂移" in text
+    # all domains stable but overall RMSD high -> inter-domain note
+    text2 = " ".join(md.interpret_stability(
+        dict(base, domain_rmsd={"dom1": {"final": 0.2, "mean": 0.15,
+                                         "series": []}})))
+    assert "域间相对运动" in text2
+    # no domain data -> no domain notes
+    text3 = " ".join(md.interpret_stability(dict(base)))
+    assert "结构域" not in text3
+
+
+def test_kabsch_recovers_known_rotation():
+    """R12/R1: Kabsch self-fit of a rotated+translated copy of a
+    well-conditioned (non-collinear) point cloud must be ~0 — catches
+    convention bugs that only show up on 3D point clouds."""
+    import numpy as np
+    from drugagent.modules.mdsim import _kabsch_rmsd
+    rng = np.random.default_rng(7)
+    ref = rng.normal(size=(20, 3)) * [10.0, 6.0, 3.0]
+    ang = np.radians(10.0)
+    R = np.array([[np.cos(ang), -np.sin(ang), 0.0],
+                  [np.sin(ang), np.cos(ang), 0.0], [0.0, 0.0, 1.0]])
+    mob = ref @ R.T + [3.0, -2.0, 1.5]
+    assert _kabsch_rmsd(mob, ref) < 1e-8

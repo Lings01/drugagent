@@ -135,3 +135,32 @@ def test_run_exposes_vhh_knobs():
     assert "--vhh-plddt-min" in res.output
     assert "--vhh-dock-flex" in res.output
     assert "--vhh-dock-cdr-only" in res.output
+
+
+def test_rerun_stage_report(tmp_path):
+    """R12/G8: `rerun --stage report` force-reruns just the report stage."""
+    import json
+    pdir = tmp_path / "proj"
+    pdir.mkdir()
+    state = {
+        "project_dir": str(pdir),
+        "options": {"modules": [], "fast": True, "no_llm": True,
+                    "llm_model": "test"},
+        "target_prep": {"clean_pdb": None,
+                        "completeness": {"chains": {"A": 100},
+                                         "ligands": [], "n_atoms": 500,
+                                         "multimer": False},
+                        "pocket": {"method": "ligand_centroid",
+                                   "center": [0, 0, 0], "xsize": 12,
+                                   "ysize": 12, "zsize": 12}},
+        "status": "success",
+    }
+    (pdir / "state.json").write_text(json.dumps(state))
+    res = runner.invoke(app, ["rerun", "--project", str(pdir),
+                              "--stage", "report", "--no-with-report"])
+    assert res.exit_code == 0, res.output
+    assert (pdir / "reports" / "report.html").is_file()
+    # unknown stage -> exit 1
+    res2 = runner.invoke(app, ["rerun", "--project", str(pdir),
+                               "--stage", "bogus"])
+    assert res2.exit_code == 1

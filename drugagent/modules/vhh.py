@@ -119,7 +119,8 @@ def model_vhh_one(args: tuple) -> dict:
 # track A: screening
 # --------------------------------------------------------------------------- #
 def vhh_cdr_fragments(pdb: Path, *, plddt_cutoff: float = 50.0, pad: int = 2,
-                      min_res: int = 4, max_frags: int = 3) -> list[list[tuple[str, int]]]:
+                      min_res: int = 4, max_frags: int = 3,
+                      max_res: int = 20) -> list[list[tuple[str, int]]]:
     """R11/G10-v2: CDR/loop-candidate fragments from a modeled VHH.
 
     Residues whose mean pLDDT (PDB B-factor) is below `plddt_cutoff` are
@@ -170,9 +171,64 @@ def vhh_cdr_fragments(pdb: Path, *, plddt_cutoff: float = 50.0, pad: int = 2,
         _flush()
     # drop runs that are basically the whole structure
     n_res = len(per_res)
-    frags = [f for f in frags if len(f) < 0.6 * n_res]
+
+    def _chunk(f):
+        # R12/G10-v3: split overlong fragments — dock cost and the
+        # out-of-box clash penalty both grow superlinearly with fragment
+        # size; a 30-residue fragment (~250+ atoms) is ~6 min and still
+        # clash-dominated, while 15-20-residue fragments dock in 1-3 min
+        if len(f) <= max_res:
+            return [f]
+        return [f[i:i + max_res] for i in range(0, len(f), max_res)
+                if len(f[i:i + max_res]) >= min_res]
+
+    frags = [c for f in frags if len(f) < 0.6 * n_res for c in _chunk(f)]
     frags.sort(key=len, reverse=True)
     return frags[:max_frags]
+
+
+def _frag_box(pdb: Path, frag: list[tuple[str, int]],
+              pocket: dict) -> dict:
+    """R12/G10-v3: per-fragment docking box.
+
+    Center stays at the pocket center (the epitope must be reachable);
+    the size is the fragment's own diameter + 8 A margin, clipped to
+    [12, 30] A. A fragment that fits fully inside its box no longer
+    pays the out-of-box clash penalty that dominated full-VHH scores
+    (2e8 kcal/mol with 773 atoms in a 25.84 A box). Falls back to the
+    pocket box when the fragment's coordinates cannot be read."""
+    keep = set(frag)
+    coords: list[tuple[float, float, float]] = []
+    try:
+        with open(pdb) as fh:
+            for line in fh:
+                if line.startswith(("ATOM", "HETATM")):
+                    try:
+                        res = (line[21:22].strip() or "A", int(line[22:26]))
+                    except ValueError:
+                        continue
+                    if res in keep:
+                        coords.append((float(line[30:38]),
+                                       float(line[38:46]),
+                                       float(line[46:54])))
+    except OSError:
+        pass
+    if not coords:
+        return {"center": list(pocket["center"]),
+                "xsize": float(pocket["xsize"]),
+                "ysize": float(pocket["ysize"]),
+                "zsize": float(pocket["zsize"])}
+    d2 = 0.0
+    for i in range(len(coords)):
+        xi, yi, zi = coords[i]
+        for j in range(i + 1, len(coords)):
+            xj, yj, zj = coords[j]
+            dd = (xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2
+            if dd > d2:
+                d2 = dd
+    size = float(np.clip(float(np.sqrt(d2)) + 8.0, 12.0, 30.0))
+    return {"center": list(pocket["center"]), "xsize": size,
+            "ysize": size, "zsize": size}
 
 
 def _write_fragment_pdb(pdb: Path, frag: list[tuple[str, int]], out: Path) -> Path:
@@ -224,7 +280,8 @@ def _dock_ligand(model_dir: Path, src_pdb: Path, idx: str, rec_pdbqt,
 
 def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
                         pocket, *, n_jobs: int = 8,
-                        flex: bool = False, cdr_only: bool = False) -> list[dict]:
+                        flex: bool = False, cdr_only: bool = False,
+                        full_fallback: bool = True) -> list[dict]:
     """R10/G7 (+R11/G10 +G10-v2): parallel VHH -> PDBQT -> Vina docking.
 
     Was a serial for-loop: with full-length VHHs (hundreds of rotatable
@@ -246,9 +303,11 @@ def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
     atoms in a 25.84 Å box) — fragments (100-200 atoms) dock in ~3-5 min
     and their scores are interpretable. The composite candidate score is
     the best (lowest) fragment score; per-fragment scores are kept in
-    `fragment_scores`. Falls back to full-VHH docking when no fragment
-    qualifies. Returns the candidate dicts updated with the docking
-    result."""
+    `fragment_scores`. When no fragment qualifies, `full_fallback=True`
+    (full mode) docks the whole VHH (~100 min); `full_fallback=False`
+    (R12/G10-v3, fast mode) skips docking for that candidate (score NaN)
+    — a 100-min clash-dominated full dock adds no triage signal.
+    Returns the candidate dicts updated with the docking result."""
     if not ok:
         return []
     n_jobs = max(1, min(n_jobs, len(ok), 16))
@@ -265,8 +324,9 @@ def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
                     frag_pdb = model_dir / f"vhh_{tag}.pdb"
                     if not frag_pdb.is_file():
                         _write_fragment_pdb(pdb, frag, frag_pdb)
+                    fbox = _frag_box(pdb, frag, pocket)  # R12/G10-v3
                     d = _dock_ligand(model_dir, frag_pdb, tag, rec_pdbqt,
-                                     pocket, cpu, flex)
+                                     fbox, cpu, flex)
                     if d.get("ok") and d.get("score") == d.get("score"):
                         frag_scores.append(d["score"])
                 best = min(frag_scores) if frag_scores else None
@@ -276,6 +336,14 @@ def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
                             top_pose_pdbqt=None,
                             n_fragments=len(frags),
                             fragment_scores=frag_scores)
+            if not full_fallback:
+                # R12/G10-v3: no CDR fragment (poorly modeled CDRs) —
+                # skip rather than pay ~100 min for a clash-dominated
+                # full-VHH score
+                return dict(r, ok=False, score=np.nan, rmsd_lb=np.nan,
+                            rmsd_ub=np.nan, top_pose_pdbqt=None,
+                            n_fragments=0, fragment_scores=[],
+                            no_frag="full_fallback_off")
         # full-VHH path (also the cdr_only fallback)
         d = _dock_ligand(model_dir, pdb, str(r["idx"]), rec_pdbqt, pocket,
                          cpu, flex)
@@ -320,16 +388,22 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
     # clash-dominated; fragments ~3-5 min with interpretable scores)
     flex = bool(d.vhh_dock_flex)
     cdr_only = bool(d.vhh_dock_cdr_only)
+    full_fallback = bool(d.vhh_dock_full_fallback)
     docked_all = dock_vhh_candidates(ok, model_dir, rec_pdbqt, pocket,
                                      n_jobs=n_jobs, flex=flex,
-                                     cdr_only=cdr_only)
-    docked = [r for r in docked_all if r.get("ok")]
-    docked.sort(key=lambda r: r.get("score", 0))
+                                     cdr_only=cdr_only,
+                                     full_fallback=full_fallback)
+    # R12/G10-v3: no-fragment candidates (full_fallback off) stay in the
+    # results with a NaN score — their pLDDT still feeds the composite
+    # ranking; they just lack a docking signal
+    docked = [r for r in docked_all if r.get("ok") or r.get("no_frag")]
+    docked.sort(key=lambda r: r.get("score") if r.get("score") ==
+                r.get("score") else float("inf"))
     return {
         "track": "A_screening",
         "n_library": len(seqs),
         "n_modeled": len(results),
-        "n_docked": len(docked),
+        "n_docked": sum(1 for r in docked_all if r.get("ok")),
         "results": docked[:50],
     }
 
@@ -445,12 +519,15 @@ def design_vhh_all(state: dict) -> dict:
     # merge with composite score
     candidates = []
     for r in track_a.get("results", []):
+        sc = r.get("score")
         candidates.append({
             "source": "screening",
             "plddt": r.get("plddt"),
-            "docking_score": r.get("score"),
+            "docking_score": None if sc is None or sc != sc else sc,
             "interface_plddt_mean": None,
             "idx": r.get("idx"),
+            "n_fragments": r.get("n_fragments"),
+            "fragment_scores": r.get("fragment_scores"),
         })
     for r in track_b.get("designs", []):
         candidates.append({

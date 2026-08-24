@@ -271,6 +271,60 @@ def resume(
 
 
 # --------------------------------------------------------------------------- #
+# rerun (R12/G8: force the CLI-ification)
+# --------------------------------------------------------------------------- #
+_STAGE_TOOL = {"target_prep": "run_target_prep", "screening": "run_screening",
+               "binder": "run_design", "vhh": "run_vhh", "md": "run_md",
+               "report": "build_report"}
+
+
+@app.command()
+def rerun(project: str = typer.Option(None, help="项目目录 (默认最新)"),
+          stage: str = typer.Option(..., help="要重跑的阶段: "
+          "target_prep|screening|binder|vhh|md|report"),
+          with_report: bool = typer.Option(True, help="阶段成功后重建报告")):
+    """强制重跑单个阶段 (G8: force=true 绕过 stage 复用; 其余阶段产物不动)."""
+    from .agent import Ctx, build_tools
+    pdir = Path(project) if project else _latest_project()
+    if pdir is None:
+        typer.echo("没有项目")
+        raise typer.Exit(1)
+    if not (pdir / "state.json").is_file():
+        typer.echo("state.json 不存在 — 先跑 `run`")
+        raise typer.Exit(1)
+    tool_name = _STAGE_TOOL.get(stage)
+    if tool_name is None:
+        typer.echo(f"未知阶段: {stage} (可选 {', '.join(_STAGE_TOOL)})")
+        raise typer.Exit(1)
+    options = dict(_load_state(pdir).get("options") or {})
+    brain = None  # stage tools are deterministic; no LLM needed
+    ctx = Ctx(pdir, brain, options, auto=True)
+    tools = {t.name: t for t in build_tools()}
+    ctx._step = 1
+    result = tools[tool_name].call(ctx, force=True)
+    ok = bool(result.get("ok"))
+    ctx.save_state(status="success" if ok else "failed")
+    icon = "✔" if ok else "✘"
+    typer.secho(f"=== rerun {stage}: {'成功' if ok else '失败'} ===",
+                fg=typer.colors.GREEN if ok else typer.colors.RED)
+    summary = str(result.get("summary", ""))
+    if summary:
+        typer.echo(summary[:400])
+    if not ok:
+        err = result.get("error")
+        if err:
+            typer.echo(f"error: {str(err)[:300]}")
+        raise typer.Exit(1)
+    if with_report and stage != "report":
+        typer.echo("重建报告...")
+        r = tools["build_report"].call(ctx, force=True)
+        if r.get("ok"):
+            typer.echo(f"报告: {r.get('report_html', pdir / 'reports' / 'report.html')}")
+        else:
+            typer.echo(f"报告重建失败: {str(r.get('error'))[:200]}")
+
+
+# --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #
 _STAGE_JSON = {"target_prep": "01_target", "screening": "02_screening",

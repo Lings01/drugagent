@@ -17,3 +17,7 @@ mdout.mdp
 /cluster.log
 /rmsd-clust.xpm
 /rmsd-dist.xvg
+# RFdiffusion scaffold-guided inference dumps step PDBs to cwd
+/step*.pdb
+# setup idempotency markers
+/.setup_done/

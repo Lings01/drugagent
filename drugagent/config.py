@@ -144,6 +144,7 @@ class Defaults:
     # (pLDDT-low runs, 100-200 atoms) dock in ~3-5 min with interpretable
     # scores; composite = best fragment. Fast mode default (below).
     vhh_dock_cdr_only: bool = False
+    vhh_dock_full_fallback: bool = True
     # md
     md_ns: float = 100.0
     md_reps: int = 3
@@ -188,6 +189,7 @@ class Defaults:
         # showed full-VHH docking is the cost driver (~80-100 min each,
         # score clash-dominated); fragments are ~15-20x cheaper.
         "vhh_dock_cdr_only": True,
+        "vhh_dock_full_fallback": False,
         "vhh_de_novo_designs": 2,
         "md_ns": 5.0,
         "md_reps": 3,

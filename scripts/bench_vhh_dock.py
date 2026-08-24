@@ -48,12 +48,22 @@ for mode in ("rigid", "flex"):
     t0 = time.time()
     run_cmd(cmd, log_file=OUT / f"vina_{mode}.log", check=True)
     dt = time.time() - t0
+    # R12: this build writes the pose to the exact --out prefix (no
+    # .pdbqt suffix); REMARK VINA RESULT: <score> <rmsd_lb> <rmsd_ub>
+    # (score is the FIRST float after the remark, not the last token)
     score = None
-    with open(prefix) as fh:
-        for line in fh:
-            if line.startswith("REMARK") and "VINA RESULT" in line:
-                score = float(line.split()[-1])
-                break
+    for cand in (Path(str(prefix)), Path(str(prefix) + ".pdbqt")):
+        if not cand.is_file():
+            continue
+        with open(cand) as fh:
+            for line in fh:
+                if line.startswith("REMARK") and "VINA RESULT" in line:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        score = float(parts[3])
+                    break
+        if score is not None:
+            break
     results[mode] = {"seconds": round(dt, 1), "min": round(dt / 60, 2),
                      "best_score": score}
     print(f"{mode}: {dt / 60:.1f} min, best score={score}")

@@ -360,3 +360,98 @@ def test_fast_cdr_only_default():
     assert resolve_defaults({}).vhh_dock_cdr_only is False
     assert resolve_defaults(
         {"fast": True, "vhh_dock_cdr_only": False}).vhh_dock_cdr_only is False
+
+
+def _big_low_pdb(tmp_path, name="big.pdb", n_res=80, low_range=(15, 50)):
+    """80-residue PDB with a long (36-res) low-pLDDT run 15..50 (45% of
+    the structure — below the 0.6 whole-structure rejection)."""
+    lines = []
+    serial = 0
+    for res in range(1, n_res + 1):
+        bf = 40.0 if low_range[0] <= res <= low_range[1] else 80.0
+        for atom in ("CA", "CB"):
+            serial += 1
+            lines.append(
+                f"ATOM  {serial:>5d} {atom:>4s} UNK A{res:>4d}    "
+                f"{float(res) % 10:8.3f}{float(res) % 7:8.3f}"
+                f"{float(res) % 13:8.3f}{1.00:6.2f}{bf:6.2f}          C")
+    p = tmp_path / name
+    p.write_text("\n".join(lines) + "\nEND\n")
+    return p
+
+
+def test_cdr_fragments_chunks_long_runs(tmp_path):
+    """R12/G10-v3: a 36-res low run (padded 38) is split into <=20-res
+    chunks so no single fragment dominates the dock runtime."""
+    from drugagent.modules.vhh import vhh_cdr_fragments
+    pdb = _big_low_pdb(tmp_path)
+    frags = vhh_cdr_fragments(pdb)
+    assert len(frags) >= 2
+    for f in frags:
+        assert len(f) <= 20
+    # chunks are contiguous and cover the padded run
+    nums = [n for _, n in frags[0]]
+    assert nums == list(range(nums[0], nums[-1] + 1))
+    # nothing dropped: union of fragments == padded run 13..52
+    alln = sorted({n for f in frags for _, n in f})
+    assert alln == list(range(13, 53))
+
+
+def test_frag_box_adaptive(tmp_path):
+    """R12/G10-v3: fragment box is pocket-centered and sized to the
+    fragment diameter (+ margin), clipped to [12, 30] A."""
+    from drugagent.modules import vhh as vh
+    pdb = _big_low_pdb(tmp_path)
+    frag = [("A", k) for k in range(20, 30)]  # 10-res fragment
+    pocket = {"center": [5.0, -1.5, 14.1], "xsize": 25.84,
+              "ysize": 25.84, "zsize": 25.84}
+    box = vh._frag_box(pdb, frag, pocket)
+    assert box["center"] == pocket["center"]
+    # coords in the fake pdb are small (<= 12 A spread) -> box ~ diameter+8
+    assert 12.0 <= box["xsize"] <= 30.0
+    assert box["xsize"] == box["ysize"] == box["zsize"]
+    # a tiny fragment -> clipped to the 12 A floor
+    frag_small = [("A", 20)]
+    box2 = vh._frag_box(pdb, frag_small, pocket)
+    assert box2["xsize"] == 12.0
+    # unknown coords (residue not in pdb) -> fallback to pocket box
+    box3 = vh._frag_box(pdb, [("B", 1)], pocket)
+    assert box3["xsize"] == pocket["xsize"]
+
+
+def test_dock_vhh_candidates_no_frag_skip(tmp_path, monkeypatch):
+    """R12/G10-v3: with full_fallback=False (fast default), a candidate
+    without CDR fragments is skipped (ok=False, no_frag, NaN score)
+    instead of paying a ~100-min full-VHH dock."""
+    import numpy as np
+    from drugagent.modules import vhh as vh
+    # no low-pLDDT run -> no fragments
+    _fake_pdb(tmp_path, name="vhh_2.pdb", low_range=(18, 18), low_bf=40.0)
+    ok = [{"idx": 2, "plddt": 60.0}]
+    full_calls = []
+
+    def fake_full_dock(model_dir, src, idx, rec, pocket, cpu, flex):
+        full_calls.append(idx)
+        return {"ok": True, "score": -5.0, "rmsd_lb": 0.0, "rmsd_ub": 0.0,
+                "top_pose_pdbqt": None}
+
+    monkeypatch.setattr(vh, "_dock_ligand", fake_full_dock)
+    out = vh.dock_vhh_candidates(ok, tmp_path, "rec.pdbqt",
+                                 {"center": [0, 0, 0], "xsize": 12,
+                                  "ysize": 12, "zsize": 12},
+                                 n_jobs=1, cdr_only=True,
+                                 full_fallback=False)
+    assert len(out) == 1
+    assert out[0]["ok"] is False
+    assert out[0]["no_frag"] == "full_fallback_off"
+    assert np.isnan(out[0]["score"])
+    assert out[0]["n_fragments"] == 0
+    assert not full_calls  # no full dock paid
+    # with full_fallback=True the full dock IS paid (default behavior)
+    out2 = vh.dock_vhh_candidates(ok, tmp_path, "rec.pdbqt",
+                                  {"center": [0, 0, 0], "xsize": 12,
+                                   "ysize": 12, "zsize": 12},
+                                  n_jobs=1, cdr_only=True,
+                                  full_fallback=True)
+    assert out2[0]["ok"] and out2[0]["score"] == -5.0
+    assert "2" in full_calls

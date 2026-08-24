@@ -96,7 +96,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 │   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
 ├── DESIGN.md                         # 2.0 架构设计
 ├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (176 快测 + 15 slow e2e)
+├── tests/                            # pytest 套件 (191 快测 + 15 slow e2e)
 └── logs/                             # 构建/运行日志
 ```
 
@@ -114,7 +114,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 ## 测试
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (176 用例)
+env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (191 用例)
 env/bin/python -m pytest tests/ -q                   # 含 slow（需 vina/GROMACS/RF 权重）
 env/bin/python -m pytest tests/test_mdsim.py -m slow -q \    --basetemp=$PWD/data/fixtures/_ptmp             # MD e2e 建议本地盘 basetemp
 ```
@@ -268,12 +268,18 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   `to_pdbqt(flex=True)` 已自动补齐（并修正 obabel 丢失的元素列）；PDBQT 缓存
   带 flex/rigid 一致性检查，模式不匹配自动重转。大配体自动降 exhaustiveness
   （<100 原子用 8，否则 1）。VHH 对接打分是"结合能力"的粗筛，不等于亲和力测定。
-  **R11/G10-v2：CDR 片段对接**（`vhh_dock_cdr_only`，fast 默认开）——基准
-  （`scripts/bench_vhh_dock.py`）显示对接成本 ~O(n^1.9) 于原子数（773 原子
-  ~80-100 min，257 原子 6.25 min），且全长 VHH 分数由"撞墙"罚分主导
-  （2.1e8 kcal/mol 量级）。故 fast 模式只对接 CDR/loop 片段：按残基 pLDDT<50
-  的连续区切 1-3 个片段（pad 2 残基），综合分取最佳片段分（`fragment_scores`
-  保留各片段分），实测 ~15× 提速。full 模式默认全长对接（更保守）。
+  **R11/G10-v2 + R12/G10-v3：CDR 片段对接**（`vhh_dock_cdr_only`，fast
+  默认开）——基准（`scripts/bench_vhh_dock.py`）显示对接成本 ~O(n^1.9) 于
+  原子数（773 原子 rigid 100.96/flex 109.73 min，同条件分数差 <0.001
+  kcal/mol），且全长 VHH 分数由"撞墙"罚分主导（2.1e8 kcal/mol 量级）。
+  fast 模式只对接 CDR/loop 片段：按残基 pLDDT<50 的连续区切 1-3 个片段
+  （pad 2 残基，**R12：>20 残基的 run 自动切块**），综合分取最佳片段分
+  （`fragment_scores` 保留各片段分，报告 VHH 表显示片段明细）。**R12 自适应
+  盒子**：每片段按自身直径+8 Å（clip 12-30 Å）建盒（中心=pocket 中心）——
+  片段装进自己的盒子后撞墙罚分消失（vhh_30 frag0：2.3e7 → 145 kcal/mol，
+  ~5 个数量级），片段对接 1.3-3 min。无有效片段时 fast 默认**跳过**
+  （`vhh_dock_full_fallback=False`，该候选 score=NaN、pLDDT 仍参与综合排名）；
+  full 模式默认全长对接（`full_fallback=True`，~100 min，更保守）。
 - **VHH pLDDT 门槛（R11/G9）**：ESMFold 对 VHH 的 pLDDT 因 CDR3 loop 无序而
   集中在 30-35（100 条实测 p50=31.5、p90=34.5、>45 仅 1 条），旧 45/70 门槛
   让 fast 模式只剩 1 个对接样本。现 fast 35 / full 50（`vhh_plddt_min` 可覆盖），
@@ -295,10 +301,15 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   柔性/界面松弛放大）；(2) 用 MDAnalysis 逐帧做 DSSP 式氢键二级结构分类
   （O..N < 4.5 Å 且 C-O..N 角 > 100°，按 1HVI 晶体标定：69% 结构化 ≈ 已知
   β-三明治含量；全残基对、双向氢键，覆盖 β-三明治 30+ 的序列 offset），
-  输出逐帧结构化占比 + 每残基稳定性；(3) 规则引擎把上面指标 + RMSF + 聚类
-  汇总成中文"柔性解读"（整体稳定 / 链间域运动 vs 去折叠 / 高柔性区 /
-  无主导构象态 / 二级结构丢失），写入 md summary 与报告第 5 节。
-  `gmx_analyze` 新增 `kind=chain` / `kind=ss`。
+  输出逐帧结构化占比 + 每残基稳定性 + **R12/R1 结构域 RMSD**（frame 0 的
+  SS 分类提取 ≥8 连续结构化残基的"结构域"，每域 CA 原子 Kabsch **自拟合**
+  到自身 frame 0 → 逐帧域 RMSD 序列，隔离域内部形变；轨迹逐原子 PBC
+  unwrap + frame 0 两级 make-whole（残基内一致 + 链走），否则跨盒残基会
+  产生 50 Å+ 幻影距离；报告第 5 节有域表格+曲线）；(3) 规则引擎把上面
+  指标 + RMSF + 聚类汇总成中文"柔性解读"（整体稳定 / 域间相对运动 vs
+  域内展开 / 结构域构象漂移 / 高柔性区 / 无主导构象态 / 二级结构丢失），
+  写入 md summary 与报告第 5 节。`gmx_analyze` 新增 `kind=chain` /
+  `kind=ss`。
   注意：MD 直接从 EM 起步，前 ~100-200 ps 属松弛段（Rg/链间 RMSD 会先跳变），
   解读时建议忽略早期段。
 - **刚性漏斗局限**：默认对接/设计基于单一刚性构象，柔性只在 MD 阶段采样；

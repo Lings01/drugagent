@@ -21,6 +21,116 @@
 | G8 阶段级幂等（run_* 完成即跳过 + force） | 已实现（第 11 轮） | agent/stages.py |
 | G9 VHH 命中面（pLDDT 门槛 35/50 + fast n=80） | 已实现（第 11 轮） | config.vhh_plddt_min / modules.vhh.screen_vhh |
 | G10 VHH 刚性对接（TORSDOF 0 + 缓存一致性） | 已实现（第 11 轮） | target_prep.make_rigid_pdbqt / modules.vhh.dock_vhh_candidates |
+| G10-v2 VHH CDR 片段对接（fast 默认，综合分=最佳片段） | 已实现（第 11 轮） | modules.vhh.vhh_cdr_fragments / dock_vhh_candidates(cdr_only) |
+| G10-v3 片段拆分 + 自适应盒子（撞墙罚分消失） | 已实现（第 12 轮） | modules.vhh._frag_box / vhh_cdr_fragments(max_res) |
+| R1 真·结构域 RMSD（SS 域提取 + 域自拟合 Kabsch） | 已实现（第 12 轮） | mdsim.find_ss_domains / domain_rmsd_series / analyze_ss / interpret 注 8 |
+| G8 收尾：rerun --stage X（force CLI 化） | 已实现（第 12 轮） | cli.rerun |
+
+## 第 12 轮（本轮）
+
+### 计划
+
+起点：第 11 轮反思优先级：G10 v3 片段打磨 → R1 真结构域 RMSD → rerun CLI →
+pLDDT 直方图/片段分进报告 → DTP 重试。bench.json flex 收尾数字（第 11 轮
+遗留）本轮先收掉。
+
+| # | 目标 | 做法 |
+|---|---|---|
+| P5 | bench 收尾 | 修分数解析 bug（误取 VINA RESULT 行尾 rmsd_ub=0.000 → 应取 score 字段）；同条件数字入档 |
+| P1 | G10 v3 片段打磨 | (a) 长片段拆分：>20 残基的 run 切成 ≤20 残基块（frag 成本超线性）；(b) **片段自适应盒子**：中心=pocket 中心，边长=片段直径+8 Å（clip 12-30 Å）——片段装进自己盒子，撞墙罚分消失；(c) `n_fragments`/`fragment_scores` 进 merge → 报告新列 |
+| P3 | `rerun --stage X` | G8 force 的 CLI 化：`drugagent rerun --project X --stage {target_prep,screening,binder,vhh,md,report} [--no-with-report]`，成功后自动重建报告 |
+| P2 | R1 真结构域 RMSD | 此 GROMACS build 无 `doomain` 工具 → 用已有 DSSP-like SS 分类（frame 0）提取**结构域**（≥8 连续结构化残基），每域 CA 原子 Kabsch 自拟合（对 frame 0 自身）→ 每帧域 RMSD 序列。与全局 `rms`（整体一次拟合）不同，域自拟合隔离**域刚体运动**。进 summary（domain_rmsd final/mean/series）+ 解读注 8（域末端 RMSD>4 Å → 铰链/变构域；整体 RMSD 高但各域稳定 → 域间相对运动）+ 报告表格+曲线 |
+| P6 | DTP 重试 | dtpbase.org 再试（第 11 轮起偶活）|
+
+P4 pLDDT 直方图：若时间不够留第 13 轮（报告侧纯展示，风险低）。
+
+### 验证
+- [x] 快速套件全绿：191（+7：CDR chunk/box 2、no_frag skip 1、domain 3、kabsch 约定 1）
+- [x] R1：r10_e2e md_rep1 真实轨迹 domain 分析——5 结构域（8-17 残基），
+      末端自拟合 RMSD 3.6-6.7 Å（apo 5ns 合理量级）；排查出 **3 个 PBC 坑**：
+      (a) 残基跨盒边界（res24 N 在 x≈0.7、CA/C/O 在 x≈58.6）毒化中心法
+      → 两级 make-whole（残基内一致 + 链走）；(b) 残基沿边界 flapping
+      （res95 x 在 58.6↔0.1 间往返）MDAnalysis 2.x `bb.unwrap()`
+      （compound/COM 法）抓不到 → 手做逐原子 min-image 累积；(c) frame 0
+      本身 95/96 跨盒 → 参考帧必须 make-whole。另修 **Kabsch 约定 bug**：
+      H=AᵀB 时 R=U D Vᵀ（原 (U D Vᵀ)ᵀ 在准线性点云上碰巧对、良态 3D 云
+      全错）——brute-force SO(3) 验证 + 回归测试
+- [x] e2e：`rerun --stage vhh`（rerun CLI + G10 v3 CDR 全链路）——9 片段
+      全 dock 成功，vhh_30 frag1 = -8.66 kcal/mol，vhh_30 综合分 1.0 居首，
+      报告 CDR 片段列渲染 ✓（详见结果 6）
+- [x] `rerun --stage md` 重分析（3 副本 ~3 min，gmx 产物全缓存）→ state
+      5 结构域 + domain_rmsd（末端 4.5-5.9 Å）+ 解读注 8 触发（dom3 构象
+      漂移 5.9 Å）+ 报告域表格渲染 ✓（详见结果 4）
+- [x] 文档（README/HANDOFF 已改）
+
+### 结果
+1. **P5 bench 收尾**：修分数解析 bug（误取 VINA RESULT 行尾 rmsd_ub=0.000；
+   此构建 pose 写到 --out 原路径无 .pdbqt 后缀）→ bench.json 最终：
+   rigid 100.96 min / flex 109.73 min（1.10×），**同条件最优分完全相同**
+   （214373513.9，差 <0.001 kcal/mol）——全长 VHH 刚柔之分无意义，搜索
+   收敛到同一个撞墙 pose。
+2. **P1 G10 v3 片段打磨**（三项全上）：
+   - **长片段切块**：>20 残基的 low-pLDDT run 自动切 ≤20 残基块
+     （vhh_30 的 30 残基 run → 20+10 两块；dock 成本超线性）。
+   - **片段自适应盒子**：中心=pocket 中心，边长=片段直径+8 Å（clip
+     12-30 Å）。实测 vhh_30 frag0（257 原子、旧 25.84 Å 盒）：**6.25 min
+     → 1.3 min，分数 2.3e7 → 145 kcal/mol（~5 个数量级）**——片段装进
+     自己盒子后撞墙罚分消失，分数进入可解读量级。
+   - **无片段跳过**：`vhh_dock_full_fallback`（fast 默认 False）——CDR 全
+     无低 pLDDT 区时不再付 ~100 min 全长 dock（撞墙分无信息量），候选
+     score=NaN、pLDDT 仍参与综合排名。full 模式默认 True（保守）。
+   - `n_fragments`/`fragment_scores` 进 merge → 报告 VHH 表新列
+     "CDR片段"（n 片段 + 最佳分）。
+3. **P3 `rerun --stage X`**：`drugagent rerun --project X --stage
+   {target_prep,screening,binder,vhh,md,report} [--no-with-report]`——
+   G8 force 的 CLI 化，成功后默认重建报告。
+4. **P2 R1 真结构域 RMSD**：frame 0 DSSP-like SS 分类提取 ≥8 连续结构化
+   残基的结构域（1HVI 二聚体 → 5 域 8-17 残基）；每域 CA Kabsch 自拟合到
+   自身 frame 0 → 逐帧域 RMSD（隔离域内部形变）。**r10_e2e md_rep1 实测
+   末端自拟合 RMSD 3.6-6.7 Å**（apo 5 ns 合理量级）。排查出 **4 个坑**
+   （全部修复+回归测试）：
+   (a) **残基跨盒**（res24：N 在 x≈0.7、CA/C/O 在 x≈58.6）毒化中心法
+   → frame 0 两级 make-whole（残基内 min-image 一致 + 链走）；
+   (b) **边界 flapping**（res95 x 在 58.6↔0.1 往返）——MDAnalysis 2.x
+   `bb.unwrap()` 是 compound/COM 法，大蛋白边缘原子抓不到 → 手做逐原子
+   min-image 累积；
+   (c) **frame 0 本身跨盒**（95/96 键跨 x 边界）参考帧必须 make-whole；
+   (d) **Kabsch 约定 bug**：H=AᵀB 时 R=U D Vᵀ（原 (U D Vᵀ)ᵀ 在准线性
+   点云上碰巧对、良态 3D 云全错，brute-force SO(3) 验证）。
+   解读注 8：域末端自拟合 RMSD>4 Å → "结构域构象漂移"注；整体 RMSD 高
+   但各域稳定 → "域间相对运动而非域内展开"。报告：域表格（残基/末端/
+   均值 Å）+ 每域 RMSD 曲线。
+5. **P6 DTP**：再试仍 SSL EOF（dtpbase.org 持续不稳）——fallback
+   chembl35_small 兜底，`setup --libraries dtp` 软失败不阻断。
+6. **e2e（`rerun --stage vhh`，一次验证 rerun CLI + G10 v3 全链路）**：
+   9 个 CDR 片段全部成功对接（30 Å 自适应盒），**vhh_30 frag1 = -8.66
+   kcal/mol**（真正有利的片段结合分！），vhh_30 综合分 1.0 居首（pLDDT
+   46.8 + 最佳片段 -8.66）；vhh_60/22/78 最佳片段 126-187；vhh_79 无
+   片段 → 旧代码路径走了全长 fallback（4.48e8 撞墙分，新代码会跳过）。
+   报告重建：CDR 片段列 ✓。总时长 ~3h（大头 = vhh_79 全长 dock ~2.5h +
+   track B 6 设计 × 6 min 无缓存重验证——见反思 2）。
+7. 快速套件 191/191 绿（+7：CDR 切块/盒子 2、no_frag 1、domain 3、
+   kabsch 约定 1）。
+
+### 反思 / 下轮缺口
+1. ✅ G10 v3 验证完成：自适应盒子是本轮最大单项收益（5 个数量级分数
+   修正 + 1.3 min/片段）；fragment_scores 进报告后可直接横向比较候选。
+2. **track B 设计验证无缓存**：`design_vhh` 对 outdir 里**全部**
+   `vhh_design_*.pdb`（含历史轮的）逐个 ESMFold 复杂验证（~6 min/个、
+   无缓存判据）——rerun 时 6 个设计 = 36 min 纯重复。下轮：设计验证
+   结果（complex_plddt/interface）落 `vhh_designs/scored.json`，存在即
+   跳过（G8 同款思路下沉到设计粒度）。
+3. **R1-v2 铰链检测**：当前域自拟合 RMSD 度量的是域**内部形变**；
+   "域相对其余蛋白的刚体运动"（真铰链/变构）需要"fit 其余蛋白、测该
+   域"的相对 RMSD——下轮补 `domain_vs_rest` 指标 + 解读注。
+4. **pLDDT 直方图（P4 顺延）**：报告 VHH 节加 pLDDT 分布直方图（G9
+   门槛 35/50 可视化）——纯展示，风险低。
+5. **MD 分析 rerun 成本**：`rerun --stage md` 会重算全部副本分析
+   （gmx 产物有缓存但 SS/域分析 + 聚类每副本 ~1-2 min）——可接受，但
+   若下轮 R1-v2 加域-其余相对 RMSD，注意别在 analyze 里再加载一遍
+   轨迹（与 SS 共用一次 MDAnalysis 加载）。
+6. bench.json 的 flex 数字（109.73 min）是在 8 核 + 其他 7 个并行
+   vina 争抢下测的；同条件分数一致已足够支撑结论，计时不必复测。
 
 ## 第 11 轮（本轮）
 
@@ -65,14 +175,15 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
    - 发现此 vina（AD4 血缘 f458505-mod）**所有** ligand 必须带 ROOT/ENDROOT
      分子图（小分子筛选一直是这么跑的），无图 ligand 报
      "Unknown or inappropriate tag" → 刚性 = 图保留 + `TORSDOF 0`。
-   - 计时（exh=1，同网格）：200 原子片段 3.4 min；**200 原子
-     TORSDOF 0 vs TORSDOF 20 = 3.4 vs 3.6 min（无差异 → 该构建忽略/自推
-     扭转数，成本由原子数主导，~O(n^1.9-2.2)）**；全长 773 原子
-     flex=76 min（e2e 实测）、rigid=101 min（bench，系统 swap 压力
-     302GB 下）→ 同量级，刚性不更慢。
-   - **刚性 vs 柔性最优 pose 分数几乎相同**：rigid 214373513.9 vs
-     flex 214373512.5（~2.1e8 kcal/mol，差 1.4）→ 搜索收敛到同一个
+   - 计时（exh=1，同网格；bench 同条件复跑）：200 原子片段 3.4 min；
+     **200 原子 TORSDOF 0 vs TORSDOF 20 = 3.4 vs 3.6 min（无差异 → 该构建
+     忽略/自推扭转数，成本由原子数主导，~O(n^1.9-2.2)）**；全长 773 原子
+     **rigid=100.96 min / flex=109.73 min（1.10×）**（e2e 早期 flex 实测
+     76 min 是轻负载下数据，量级一致）。
+   - **同条件（同 seed/盒/核数）rigid vs flex 最优 pose 分数完全一致**：
+     均 214373513.9（~2.1e8 kcal/mol，差 <0.001）→ 搜索收敛到同一个
      "撞墙" pose（773 原子塞进 25.84 Å 盒，绝大部分原子在盒外吃罚分）。
+     修了 bench 脚本分数解析 bug（误取 VINA RESULT 行尾 rmsd_ub）。
    - 结论：刚性默认 = 语义正确 + pose 质量不劣 + 不更慢；**但绝对分
      目前由撞墙主导、意义有限** → 真正杠杆是缩小配体/盒子（CDR 片段
      对接：~100-200 原子 ≈ 3-5 min/候选，~15-20×）。

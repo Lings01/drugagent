@@ -2405,17 +2405,30 @@ def _ss_backbone_trajectory(tpr: Path, xtc: Path) -> np.ndarray:
     u = MDA.Universe(str(tpr), str(xtc))
     bb = u.select_atoms("name N or name CA or name C or name O")
     roles = {"N": 0, "CA": 1, "C": 2, "O": 3}
+    # R12/R1: per-atom PBC unwrapping (classic min-image accumulation) so
+    # per-domain (subset) RMSD is not corrupted by boundary flapping — an
+    # atom at the edge of a large protein can cross the box repeatedly
+    # while the compound COM (MDAnalysis 2.x `bb.unwrap`, compound-based)
+    # never moves > box/2, leaving phantom 50+ A intra-domain distances.
+    # Frame 0 is the unwrap reference, so SS classification and the
+    # domain reference are identical to the wrapped trajectory.
+    box = np.zeros(3)
+    prev_raw = None
+    unwrapped = None
     # map each selected atom to (residue slot, role). Residue objects are not
     # stable across MDAnalysis calls, so use set intersection instead of
     # object identity.
     bb_set = set(bb.indices)
     res_of_atom: dict[int, int] = {}
+    sel_pos = {int(i): k for k, i in enumerate(bb.indices)}
+    slot_atoms: list[list[int]] = []  # selection positions per residue slot
     slot = -1
     for r in bb.residues:
         atoms = [a for a in r.atoms if a.index in bb_set and a.name in roles]
         if not atoms:
             continue
         slot += 1
+        slot_atoms.append([sel_pos[a.index] for a in atoms])
         for a in atoms:
             res_of_atom[a.index] = slot
     n_res = slot + 1
@@ -2427,10 +2440,117 @@ def _ss_backbone_trajectory(tpr: Path, xtc: Path) -> np.ndarray:
     flat_idx3 = flat_idx[:, None] + np.arange(3)
     frames = []
     for ts in u.trajectory:
+        raw = bb.positions
+        if unwrapped is None:
+            unwrapped = raw.copy()
+            # R12/R1: frame-0 make-whole (chain walk) — per-atom unwrap
+            # alone cannot fix an image split that already exists at the
+            # reference frame (e.g. a bond crossing the box at t=0 would
+            # otherwise read as a ~50 A phantom distance forever)
+            box0 = np.asarray(u.dimensions[:3], dtype=float)
+            if box0.min() > 1.0 and len(slot_atoms) > 1:
+                # stage 1: make each residue internally consistent — a
+                # single residue can straddle a box boundary (N on one
+                # side, CA/C/O on the other), which poisons any
+                # center-based step
+                for idxs in slot_atoms:
+                    a0 = unwrapped[idxs[0]]
+                    for k in idxs[1:]:
+                        d = unwrapped[k] - a0
+                        unwrapped[k] -= box0 * np.round(d / box0)
+                # stage 2: chain walk — pull each residue to its
+                # predecessor's image (dimer interfaces included: the
+                # walk only needs consecutive slots within box/2)
+                prev_center = unwrapped[slot_atoms[0]].mean(axis=0)
+                for idxs in slot_atoms[1:]:
+                    c = unwrapped[idxs].mean(axis=0)
+                    c = c - box0 * np.round((c - prev_center) / box0)
+                    shift = c - unwrapped[idxs].mean(axis=0)
+                    if np.any(shift != 0):
+                        unwrapped[idxs] += shift
+                    prev_center = c
+        else:
+            box = np.asarray(u.dimensions[:3], dtype=float)
+            d = raw - prev_raw
+            d = d - box * np.round(d / box)
+            unwrapped = unwrapped + d
+        prev_raw = raw.copy()
         flat = np.full(n_res * 4 * 3, np.nan)
-        flat[flat_idx3] = bb.positions
+        flat[flat_idx3] = unwrapped
         frames.append(flat.reshape(n_res, 4, 3))
     return np.stack(frames)
+
+
+def find_ss_domains(codes: np.ndarray, min_res: int = 8) -> list[dict]:
+    """R12/R1: structural domains from per-residue DSSP-like codes.
+
+    A domain is a maximal contiguous run of structured residues
+    (codes > 0) with length >= min_res. Returns
+    [{name, res_start, res_end, n_res}] in sequence order (1-based
+    inclusive)."""
+    n = len(codes)
+    out: list[dict] = []
+    i = 0
+    while i < n:
+        if codes[i] > 0:
+            j = i
+            while j + 1 < n and codes[j + 1] > 0:
+                j += 1
+            if j - i + 1 >= min_res:
+                out.append({"name": f"dom{len(out) + 1}",
+                            "res_start": int(i + 1), "res_end": int(j + 1),
+                            "n_res": int(j - i + 1)})
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def _kabsch_rmsd(mobile: np.ndarray, ref: np.ndarray) -> float:
+    """RMSD (nm) after optimally rotating+translating `mobile` onto
+    `ref` (both (n, 3), same atom order)."""
+    cm, cr = mobile.mean(axis=0), ref.mean(axis=0)
+    A, B = mobile - cm, ref - cr
+    H = A.T @ B
+    U, _, Vt = np.linalg.svd(H)
+    D = np.diag([1.0, 1.0, float(np.sign(np.linalg.det(U @ Vt)))])
+    # both A and B are centered -> compare in the centered frame (adding
+    # cr back here would offset the RMSD by the reference centroid).
+    # R = U D Vt (H = A.T @ B convention; verified against brute-force
+    # SO(3) search — the transposed variant silently overfits collinear
+    # clouds yet fails on well-conditioned ones)
+    fitted = A @ (U @ D @ Vt)
+    return float(np.sqrt(np.mean(np.sum((fitted - B) ** 2, axis=1))))
+
+
+def domain_rmsd_series(coords: np.ndarray,
+                       domains: list[dict]) -> dict[str, list[float]]:
+    """R12/R1: per-frame domain RMSD (CA atoms) with each domain
+    Kabsch-fit to its OWN frame-0 structure.
+
+    Unlike the global `rms` (one fit for the whole system), fitting each
+    domain to itself isolates the domain's rigid-body motion — the true
+    structural-domain RMSD (DSSP-domain / NMDYN-style idea without the
+    extra tool; this GROMACS build has no `doomain`). NaN where <3 CA
+    atoms are finite. coords: (F, R, 4, 3), role 1 = CA."""
+    out: dict[str, list[float]] = {}
+    F = coords.shape[0]
+    for d in domains:
+        s, e = d["res_start"] - 1, d["res_end"]
+        ref = coords[0, s:e, 1, :]
+        ok = np.isfinite(ref[:, 0])
+        if int(ok.sum()) < 3:
+            continue
+        series: list[float] = []
+        for f in range(F):
+            mob = coords[f, s:e, 1, :]
+            m = np.isfinite(mob[:, 0]) & ok
+            if int(m.sum()) < 3:
+                series.append(float("nan"))
+            else:
+                series.append(_kabsch_rmsd(mob[m], ref[m]))
+        out[d["name"]] = series
+    return out
 
 
 def analyze_ss(tpr: Path, xtc: Path) -> dict:
@@ -2449,9 +2569,16 @@ def analyze_ss(tpr: Path, xtc: Path) -> dict:
             "C": coords[f, :, 2, :], "O": coords[f, :, 3, :]})
     structured = (codes > 0).mean(axis=1)
     stable = (codes == codes[0][None, :]).mean(axis=0)
+    # R12/R1: structural domains (from frame 0) + per-domain rigid-body
+    # RMSD — reuses the already-loaded trajectory (no second MDAnalysis
+    # pass)
+    domains = find_ss_domains(codes[0])
+    domain_rmsd = domain_rmsd_series(coords, domains) if domains else {}
     return {"ss_frac": structured.tolist(),
             "ss_stable": stable.tolist(),
-            "n_frames": int(F), "n_residues": int(R)}
+            "n_frames": int(F), "n_residues": int(R),
+            "domains": domains,
+            "domain_rmsd": domain_rmsd}
 
 
 def flexible_regions(rmsf_profile: list[float], *,
@@ -2594,6 +2721,28 @@ def interpret_stability(summary: dict) -> list[str]:
                     f"({m_rmsf * 10:.1f} Å > 2.5 Å) — 晶体结构不是可靠单代表, "
                     "建议短 MD 系综 + 柔性靶点工作流 (make_flex_receptor + "
                     "dock_conformer_set, 用 consensus 分数判命中)")
+    # 8) R12/R1: structural-domain RMSD (each domain Kabsch-fit to its own
+    # frame 0 -> rigid-body domain motion, independent of the global fit)
+    dom_rmsd = summary.get("domain_rmsd") or {}
+    if dom_rmsd:
+        doms = summary.get("domains") or []
+        worst_name = max(dom_rmsd, key=lambda k: dom_rmsd[k]["final"])
+        worst = dom_rmsd[worst_name]
+        dd = next((d for d in doms if d.get("name") == worst_name), {})
+        if worst["final"] > 0.40:
+            notes.append(
+                f"结构域 {worst_name} (残基 {dd.get('res_start')}-"
+                f"{dd.get('res_end')}) 存在明显构象漂移 (末端自拟合 RMSD "
+                f"{worst['final'] * 10:.1f} Å, 均值 "
+                f"{worst['mean'] * 10:.1f} Å) — 该短结构段内部形变显著 "
+                "(环区/不稳定二级结构, 无配体稳定); 若邻近结合口袋, 建议"
+                "柔性靶点工作流; 铰链式刚体域运动需域-其余蛋白相对 "
+                "RMSD 进一步确认 (R1-v2)")
+        elif f is not None and f > 0.30 and all(
+                v["final"] < 0.30 for v in dom_rmsd.values()):
+            notes.append(
+                f"各结构域内部均稳定 (最大末端 RMSD {worst['final'] * 10:.1f} "
+                "Å < 3.0 Å) — 高整体 RMSD 主要来自域间相对运动而非域内展开")
     return notes
 
 
@@ -2771,6 +2920,8 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
             ss = analyze_ss(rdir / "md.tpr", xtc)
             a["ss_frac"] = ss["ss_frac"]
             a["ss_stable"] = ss["ss_stable"]
+            a["domains"] = ss.get("domains") or []
+            a["domain_rmsd"] = ss.get("domain_rmsd") or {}
         except Exception as e:  # noqa: BLE001 - diagnostics must not kill MD
             logger.warning(f"replica {r['rep']} SS analysis failed: {e}")
         per_rep.append(a)
@@ -2815,6 +2966,30 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
                           if ss_mats else None),
         "replicas": per_rep,
     }
+    # R12/R1: structural-domain RMSD (mean across replicas)
+    dom_names: list[str] = []
+    for r in per_rep:
+        for d in r.get("domains") or []:
+            if d["name"] not in dom_names:
+                dom_names.append(d["name"])
+    domain_summary = {}
+    for name in dom_names:
+        series = [np.array(r["domain_rmsd"][name], dtype=float)
+                  for r in per_rep if r.get("domain_rmsd")
+                  and name in r["domain_rmsd"] and r["domain_rmsd"][name]]
+        if series:
+            L = min(len(s) for s in series)
+            arr = np.stack([s[:L] for s in series])
+            arr = np.nan_to_num(arr, nan=0.0)
+            domain_summary[name] = {
+                "final": round(float(arr[:, -1].mean()), 4),
+                "mean": round(float(arr.mean()), 4),
+                "series": np.round(arr.mean(axis=0), 4).tolist(),
+            }
+    if domain_summary:
+        summary["domains"] = next(
+            (r["domains"] for r in per_rep if r.get("domains")), [])
+        summary["domain_rmsd"] = domain_summary
     # per-chain RMSD (mean across replicas + mean final value)
     for key in sorted({k for r in per_rep for k in r
                        if k.startswith("rmsd_chain") and k != "rmsd"}):
