@@ -240,17 +240,28 @@ def _setup_dtp() -> None:
 
 def _setup_pdbbind() -> None:
     dst = LIBRARIES / "pdbbind.sdf"
-    if dst.exists():
+    if dst.exists() and dst.stat().st_size > 1_000_000:
         return
-    # PDBBind provides tar.gz of SDFs; try known URL, else build small library
+    # PDBBind provides a tar.gz of SDFs. As of 2026-08 (R11) the public
+    # mirror is dead: both URLs return a 138-byte 404 HTML page (the
+    # download is now registration-gated via download.php) — the 138-byte
+    # pdbbind.tar.gz on this box is exactly that 404 page. Validate the
+    # tarball, drop corrupt leftovers, and soft-fail: resolve_library()
+    # falls back to chembl35_small at screening time, so a missing
+    # PDBBind must not kill `drugagent setup`.
     urls = [
         "https://www.pdbbind.org.cn/pdbbind/DownloadData/PDBBind_v20201216.tar.gz",
         "http://www.pdbbind.org.cn/pdbbind/DownloadData/PDBBind_v20201216.tar.gz",
     ]
+    raw = LIBRARIES / "pdbbind.tar.gz"
+    last = None
     for u in urls:
         try:
-            raw = LIBRARIES / "pdbbind.tar.gz"
-            download_file(u, raw, retries=1)
+            if raw.exists() and raw.stat().st_size < 1_000_000:
+                logger.warning(f"dropping stale corrupt {raw.name} "
+                               f"({raw.stat().st_size} bytes)")
+                raw.unlink()
+            download_file(u, raw, retries=1, expected_size_min=1_000_000)
             with tarfile.open(raw) as t:
                 members = [m for m in t.getmembers() if m.name.endswith(".sdf")]
                 with open(dst, "wb") as fo:
@@ -259,8 +270,14 @@ def _setup_pdbbind() -> None:
                             shutil.copyfileobj(src, fo)
             return
         except Exception as e:  # noqa: BLE001
+            last = e
             logger.warning(f"PDBBind download failed: {e}")
-    raise RuntimeError("PDBBind download failed")
+    logger.warning(
+        f"PDBBind download failed ({last}); the mirror appears "
+        "registration-gated (see pdbbind.org.cn/download.php). "
+        "Screening will fall back to chembl35_small via resolve_library; "
+        "retry later or copy a PDBBind SDF to "
+        f"{LIBRARIES / 'pdbbind.sdf'} manually.")
 
 
 def _setup_vhh_library() -> None:

@@ -10,6 +10,7 @@ from ..modules import binder as bd
 from ..modules.esmfold_run import interface_metrics, predict
 from ..utils import jsave
 from .loop import Ctx, Tool, ToolError
+from .stages import maybe_reuse, summarize_binder
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
 
@@ -170,15 +171,18 @@ def score_designs(ctx: Ctx) -> dict:
                      for s in scored[:3]]}
 
 
-def run_design(ctx: Ctx) -> dict:
-    """Full deterministic binder stage (1.0 pipeline as one tool)."""
+def run_design(ctx: Ctx, force: bool = False) -> dict:
+    """Full deterministic binder stage (1.0 pipeline as one tool).
+
+    R11/G8: reuses state.binder when complete (designs + best); force=true
+    to re-run."""
+    cached = maybe_reuse(ctx, "binder", force)
+    if cached is not None:
+        return cached
     st = ctx.state()
     state_out = bd.design_binder(st)    # returns full state
-    out = state_out["binder"]
-    ctx.save_state(binder=out)
-    return {"n_designs": out["n_designs"],
-            "binder_type": out.get("binder_type"),
-            "best": out.get("best")}
+    ctx.save_state(binder=state_out["binder"])
+    return summarize_binder(ctx.state())
 
 
 # --------------------------------------------------------------------------- #
@@ -220,6 +224,10 @@ def build() -> list[Tool]:
              {"type": "object", "properties": {}, "required": []},
          score_designs),
         Tool("run_design",
-             "整段 binder 设计 (确定性标准流程: RF设计→MPNN→ESMFold打分)。",
-             {"type": "object", "properties": {}, "required": []}, run_design),
+             "整段 binder 设计 (确定性标准流程: RF设计→MPNN→ESMFold打分)。"
+             "已完成阶段自动复用, force=true 强制重跑。",
+             {"type": "object",
+              "properties": {"force": {"type": "boolean",
+                                       "description": "强制重跑 (默认复用已完成阶段)"}},
+              "required": []}, run_design),
     ]

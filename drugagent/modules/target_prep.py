@@ -126,6 +126,17 @@ def analyze_completeness(pdb_path: Path) -> dict:
         report["issues"] = [{"type": "precheck_error", "severity": "warn",
                              "detail": str(e), "suggestion": "manual review",
                              "fix": None}]
+    # R11/R5: apo targets need an early flag — the pocket is inferred, and
+    # after MD the auto-criterion (apo + high RMSF) triggers the
+    # flexible-target workflow (see mdsim.interpret_stability)
+    if not report["has_ligand"]:
+        report["issues"].append({
+            "type": "apo_target", "severity": "info",
+            "detail": "no bound ligand/metal (apo structure) — 对接位点只能推断",
+            "suggestion": "R5 自动判据: 后续 MD 若平均 RMSF 偏高, 建议短 MD "
+                          "系综 + 柔性靶点工作流 (make_flex_receptor + "
+                          "dock_conformer_set, consensus 判命中)",
+            "fix": None})
     # obvious problems
     problems = []
     if not chains:
@@ -719,6 +730,26 @@ def _add_molecule_graph(pdbqt: Path) -> None:
     remarks = [l for l in lines if l.startswith("REMARK")]
     new = remarks + ["ROOT"] + atoms + ["ENDROOT", f"TORSDOF {torsion}"]
     pdbqt.write_text("\n".join(new) + "\n")
+
+
+def make_rigid_pdbqt(pdbqt: Path) -> Path:
+    """R11/G10: zero the active-torsion count so the ligand docks as a rigid
+    body. This vina build requires the ROOT/ENDROOT molecule-graph keywords
+    on every ligand (small molecules included), so a rigid ligand is a
+    graph with ``TORSDOF 0`` — NOT a graph-less file (a graph-less ligand
+    fails with "Unknown or inappropriate tag"). The graph carries only the
+    torsion count (no per-torsion atom lines), so rewriting the count is
+    sufficient."""
+    lines = pdbqt.read_text().splitlines()
+    changed = False
+    for i, l in enumerate(lines):
+        if l.startswith("TORSDOF"):
+            if l != "TORSDOF 0":
+                lines[i] = "TORSDOF 0"
+                changed = True
+    if changed:
+        pdbqt.write_text("\n".join(lines) + "\n")
+    return pdbqt
 
 
 # --------------------------------------------------------------------------- #

@@ -14,7 +14,7 @@
 | A 靶点准备 | PDB 文件 / PDB ID / FASTA / 裸序列输入；完整性分析 + 结构坑预检（多 MODEL/altloc/缺失残基/金属/核酸/无序末端）；agent 判定；自动+手动修复 PDB；清洗；口袋检测；PDBQT 转换 | RCSB, obabel, ESMFold（仅序列输入） |
 | B 小分子筛选 | 大库（DTP/ChEMBL/PDBBind 或自定义 SDF）→ 标准化 → 理化/ML 预过滤 → Vina 并行对接 → GNINA 复打分 → agent 定命中标准（参考配体重对接做阳性对照）；**柔性靶点工作流（R2/R5：MD 构象系综 → 多构象选择 + 侧链 `--flex`，consensus 平均分）** | RDKit, Vina, GNINA |
 | C binder 设计 | RFdiffusion 从头设计 + ProteinMPNN 序列 + ESMFold 单体/复合物打分（界面 pLDDT） | RFdiffusion, ProteinMPNN, ESMFold |
-| D 纳米抗体 | 轨道A：合成 VHH 库 → ESMFold 建模 → 对接筛选；轨道B：RFdiffusion scaffold-guided（1EWN）从头设计；综合评分 + agent 选择 | ESMFold, RFdiffusion, Vina |
+| D 纳米抗体 | 轨道A：VHH 库（data/libraries/vhh_library.fasta 或合成）→ ESMFold 建模 → pLDDT 过滤（R11/G9：fast 35 / full 50，可 `vhh_plddt_min` 覆盖）→ **刚性对接**（R11/G10：全长 VHH 当刚性配体，`vhh_dock_flex` 可开柔性）→ 并行筛选；轨道B：RFdiffusion scaffold-guided（1EWN）从头设计；综合评分 + agent 选择 | ESMFold, RFdiffusion, Vina |
 | E MD 模拟 | 体系选择 → pdb2gmx + ACPYPE (GAFF2) → 溶胀/加离子/EM → **NVT→NPT 平衡段（R5，带位置约束；R8 改 C-rescale）+ 生产 MD 烧入段剔除** → N ns × R 副本（自平衡态分叉）→ **收敛判定 + 自动延长（R6：RMSD 平台 + 主导簇，未收敛自动续跑合并）** → RMSD/RMSF/Rg/聚类 + **柔性诊断（分链/自拟合 RMSD + DSSP 式二级结构 + 柔性区定位（连续高 RMSF 段→残基区间）+ 规则化柔性解读）** + **金属离子协调（R3）** + **核酸链原生参数化（R4）** + **辅因子/血红素自动参数化（R8：ACPYPE + 嵌入金属独立离子）** | GROMACS 2023.1, ACPYPE, MDAnalysis |
 
 ## 快速开始
@@ -62,7 +62,9 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
   `--auto` 自动通过并记录。
 - **状态**：项目目录是唯一事实源。`state.json` 保存阶段索引；
   `agent/transcript.jsonl` 记录完整对话+工具调用（resume = 重放 transcript 继续）；
-  工具产物幂等（已完成的 mdrun/对接自动复用）。
+  两层幂等：工具产物级（已完成的 mdrun/对接/PDBQT 自动复用）+
+  **阶段级（R11/G8：`run_*` 工具在 state.json 阶段段完整时整体跳过，
+  `force=true` 强制重跑；重启崩溃的 e2e 不再整段重跑已完成的 35 分钟筛选）**。
 
 ## LLM
 
@@ -94,22 +96,25 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 │   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
 ├── DESIGN.md                         # 2.0 架构设计
 ├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (147 快测 + 15 slow e2e)
+├── tests/                            # pytest 套件 (174 快测 + 15 slow e2e)
 └── logs/                             # 构建/运行日志
 ```
 
 ## 运行状态与断点
 
-- `status` 汇总阶段进度 + agent 步数；`decisions.json` 记录每个判断与依据。
+- `status`（R11 增强）：每个阶段的完成状态 + 关键数字（对接数/命中数/
+  设计数/MD ns 与 final RMSD/库名含回退标注）、磁盘上的阶段 JSON 产物、
+  最近 3 条工具失败（state.errors + transcript 里 ok=false 的调用）、
+  transcript 最后一条；`decisions.json` 记录每个判断与依据。
 - `resume --project DIR`：重放 `agent/transcript.jsonl`，从断点继续
-  （已完成的产物幂等复用）。
+  （产物幂等 + 阶段级复用，R11/G8）。
 - 报告：`projects/<项目>/reports/report.html`（Plotly 交互图 + 3Dmol 结构）
   与 `report.pdf`。
 
 ## 测试
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (147 用例)
+env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (174 用例)
 env/bin/python -m pytest tests/ -q                   # 含 slow（需 vina/GROMACS/RF 权重）
 env/bin/python -m pytest tests/test_mdsim.py -m slow -q \    --basetemp=$PWD/data/fixtures/_ptmp             # MD e2e 建议本地盘 basetemp
 ```
@@ -255,11 +260,23 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   fast 模式短轨迹属稳定性验证，非生产级自由能/收敛结论。
 - **MD 单位**：GROMACS 的 rms/gyrate 输出为 nm（rmsf 为 Å，cluster 截断 1.5 为 nm）；
   报告展示时 RMSD 已换算为 Å（×10），Rg 保持 nm。
-- **VHH 对接**：完整 VHH 是"巨型配体"（~770 原子、200+ 可旋转键）。本 vina 构建
-  的柔性配体必须带 AD4 分子图关键字（ROOT/ENDROOT + TORSDOF），obabel 产物默认没有，
-  `to_pdbqt(flex=True)` 已自动补齐（并修正 obabel 丢失的元素列）。大配体自动降
-  exhaustiveness（<100 原子用 8，否则 1），否则每个 VHH 对接要数小时。
-  VHH 对接打分是"结合能力"的粗筛，不等于亲和力测定。
+- **VHH 对接**：完整 VHH 是"巨型配体"（~770 原子、200+ 可旋转键）。**R11/G10：
+  默认刚性对接**（ESMFold 单模型只有一个构象，200+ 扭转的搜索空间只拖慢
+  不增益；且该 vina 构建对大配体 `--cpu 64` 实测仍单核，见 ROUNDLOG R10/G10 证据），
+  `options.vhh_dock_flex=true` 可开柔性（慢 1 个数量级以上）。本 vina 构建的
+  柔性配体必须带 AD4 分子图关键字（ROOT/ENDROOT + TORSDOF），obabel 产物默认没有，
+  `to_pdbqt(flex=True)` 已自动补齐（并修正 obabel 丢失的元素列）；PDBQT 缓存
+  带 flex/rigid 一致性检查，模式不匹配自动重转。大配体自动降 exhaustiveness
+  （<100 原子用 8，否则 1）。VHH 对接打分是"结合能力"的粗筛，不等于亲和力测定。
+- **VHH pLDDT 门槛（R11/G9）**：ESMFold 对 VHH 的 pLDDT 因 CDR3 loop 无序而
+  集中在 30-35（100 条实测 p50=31.5、p90=34.5、>45 仅 1 条），旧 45/70 门槛
+  让 fast 模式只剩 1 个对接样本。现 fast 35 / full 50（`vhh_plddt_min` 可覆盖），
+  fast 屏 80 条。
+- **小分子库回退**：DTP/PDBBind 镜像不稳（R11 实测：pdbbind.org.cn 的两个
+  tar.gz URL 已 404，返回 138 字节 404 页；下载现需注册）。`resolve_library()`
+  在 dtp/pdbbind 缺失或 <1MB 时自动回退 chembl35_small（50k），state 与报告
+  标明 "fallback for dtp"；`setup --libraries pdbbind` 软失败不再打断整体
+  setup，坏 tarball（<1MB）自动丢弃。
 - **结构坑预检**：`analyze_pdb` 会扫描多 MODEL 叠加（NMR 系综/多构象）、备选位置
   altloc、缺失残基（含 SEQRES 对比）、金属离子、核酸、末端无序区等坑并给出建议
   action；`repair_structure(actions=[...])` 按 action 修好 PDB。`run_target_prep`

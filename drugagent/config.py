@@ -124,6 +124,19 @@ class Defaults:
     vhh_lib_size: int = 20_000
     vhh_screen_n: int = 1000
     vhh_de_novo_designs: int = 8
+    # R11/G9: mean-structure pLDDT gate for track A. ESMFold pLDDT for
+    # VHHs (real or synthetic) concentrates at 30-35 because CDR3 loops
+    # are disordered in the model — a 70 gate would screen out almost
+    # everything. 50 keeps the full-mode bar meaningful while fast mode
+    # relaxes further (see fast dict) because docking, not modeling, is
+    # the fast-mode cost driver.
+    vhh_plddt_min: float = 50.0
+    # R11/G10: dock full VHHs as RIGID bodies by default. A folded domain
+    # from a single ESMFold model has one conformation; letting hundreds of
+    # torsions roam turns a triage screen into a 30-min-per-candidate job
+    # (this vina build also runs single-core on big ligands). Set
+    # vhh_dock_flex=true via options for a (much slower) flexible screen.
+    vhh_dock_flex: bool = False
     # md
     md_ns: float = 100.0
     md_reps: int = 3
@@ -156,9 +169,14 @@ class Defaults:
         "screen_time_budget_h": 2.0,
         "n_binder_designs": 2,
         "vhh_lib_size": 2000,
-        # R10/G7: 100 was too slow even parallel (full-VHH dock ~minutes
-        # each); 40 keeps --fast a true validation scale
-        "vhh_screen_n": 40,
+        # R11/G9: widen the hit surface — measured pLDDT of 100 modeled
+        # VHHs: p50=31.5, p90=34.5, only 1/100 > 45. A 45 gate left a
+        # single docking candidate (Module D had no statistical power).
+        # 35 passes ~6-10% of candidates; R11/G10 rigid docking makes the
+        # extra candidates cheap. 80 keeps --fast a validation scale while
+        # giving the dock step a real sample.
+        "vhh_screen_n": 80,
+        "vhh_plddt_min": 35.0,
         "vhh_de_novo_designs": 2,
         "md_ns": 5.0,
         "md_reps": 3,

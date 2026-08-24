@@ -210,6 +210,26 @@ def test_interpret_stability_rules():
     assert "二级结构" in text and "去折叠" in text
 
 
+def test_interpret_stability_r5_apo_criterion():
+    """R11/R5: apo system + high mean RMSF triggers the flexible-target
+    workflow recommendation; liganded systems and low RMSF do not."""
+    base = {"final_rmsd_mean": 0.20, "final_rg_mean": 3.5,
+            "rmsf_profile_mean": [0.35] * 100}  # mean 3.5 Å > 2.5 Å
+    # apo + high RMSF -> fires
+    text = " ".join(md.interpret_stability(dict(base, is_ligand=False)))
+    assert "R5" in text and "系综" in text
+    # liganded + high RMSF -> does not fire (criterion is apo-specific)
+    text = " ".join(md.interpret_stability(dict(base, is_ligand=True)))
+    assert "R5" not in text
+    # apo but low RMSF -> does not fire
+    low = dict(base, is_ligand=False, rmsf_profile_mean=[0.10] * 100)
+    text = " ".join(md.interpret_stability(low))
+    assert "R5" not in text
+    # unknown (no is_ligand key) -> does not fire
+    text = " ".join(md.interpret_stability(dict(base)))
+    assert "R5" not in text
+
+
 SMOKE_REP = Path(__file__).resolve().parent.parent / \
     "projects/agent_smoke_0821_0404/05_md/md_rep1"
 

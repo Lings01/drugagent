@@ -12,6 +12,7 @@ from ..config import DEFAULTS, resolve_defaults, n_cores
 from ..modules import mdsim as md
 from ..utils import jsave, run_cmd
 from .loop import Ctx, Tool, ToolError
+from .stages import maybe_reuse, summarize_md
 
 SOLVENT_RES = {"HOH", "WAT", "SOL", "NA", "CL", "K", "MG", "ZN", "CA", "NA+", "CL-"}
 
@@ -450,6 +451,13 @@ def md_summary(ctx: Ctx, label: str = "", workdir: str = "05_md") -> dict:
         # profile, so the report/interpretation can cite flexible loops
         summary["flexible_regions"] = md.flexible_regions(
             summary["rmsf_profile_mean"])
+        # R11/R5: expose the apo/liganded flag so interpret_stability's
+        # auto-criterion (apo + high RMSF → 柔性靶点工作流) can fire.
+        # md_prepare stores is_ligand; run_md stores it inside system.
+        _m_state = ctx.state().get("md") or {}
+        summary["is_ligand"] = bool(
+            _m_state.get("is_ligand",
+                         (_m_state.get("system") or {}).get("ligand")))
         summary["interpretation"] = md.interpret_stability(summary)
     ns = None
     if replicas and replicas[0].get("final_step"):
@@ -474,16 +482,18 @@ def md_summary(ctx: Ctx, label: str = "", workdir: str = "05_md") -> dict:
             "md_json": str(base / "md.json")}
 
 
-def run_md(ctx: Ctx) -> dict:
-    """Full deterministic MD stage (1.0 pipeline as one tool)."""
+def run_md(ctx: Ctx, force: bool = False) -> dict:
+    """Full deterministic MD stage (1.0 pipeline as one tool).
+
+    R11/G8: reuses state.md when complete (summary + replicas); force=true
+    to re-run."""
+    cached = maybe_reuse(ctx, "md", force)
+    if cached is not None:
+        return cached
     st = ctx.state()
     state_out = md.run_md(st)           # returns full state
-    out = state_out["md"]
-    ctx.save_state(md=out)
-    return {"system": out.get("system"), "ns": out.get("ns"),
-            "reps": out.get("reps"),
-            "final_rmsd_mean": (out.get("summary") or {}).get("final_rmsd_mean"),
-            "final_rg_mean": (out.get("summary") or {}).get("final_rg_mean")}
+    ctx.save_state(md=state_out["md"])
+    return summarize_md(ctx.state())
 
 
 # --------------------------------------------------------------------------- #
@@ -545,7 +555,11 @@ def build() -> list[Tool]:
                              "workdir": {"type": "string"}},
               "required": []}, md_summary),
         Tool("run_md",
-             "整段 MD (确定性标准流程: 选体系→建体系→固定模板→3 副本→分析)。",
-             {"type": "object", "properties": {}, "required": []},
+             "整段 MD (确定性标准流程: 选体系→建体系→固定模板→3 副本→分析)。"
+             "已完成阶段自动复用, force=true 强制重跑。",
+             {"type": "object",
+              "properties": {"force": {"type": "boolean",
+                                       "description": "强制重跑 (默认复用已完成阶段)"}},
+              "required": []},
          run_md, long_running=True),
     ]

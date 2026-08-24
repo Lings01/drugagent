@@ -40,6 +40,54 @@ def test_status_no_project():
     assert res.exit_code == 0
 
 
+def test_status_stage_detail_and_errors(tmp_path):
+    """R11: status shows per-stage completion + key numbers, artifacts and
+    recent tool failures (not just ✓/✗)."""
+    import json
+    pdir = tmp_path / "proj"
+    (pdir / "agent").mkdir(parents=True)
+    (pdir / "02_screening").mkdir(parents=True)
+    state = {
+        "project_dir": str(pdir),
+        "status": "running",
+        "options": {},
+        "target_prep": {
+            "raw_pdb": "r.pdb", "clean_pdb": "c.pdb",
+            "receptor_pdbqt": "rec.pdbqt",
+            "pocket": {"method": "ligand_centroid(A77)",
+                       "center": [0, 0, 0], "xsize": 12,
+                       "ysize": 12, "zsize": 12},
+            "ligand_resnames": ["A77"],
+        },
+        "screening": {
+            "n_docked": 42, "hit_decision": {"n_hits": 2, "threshold": -8.0},
+            "hits": [{"rank": 1, "smiles": "c1ccccc1", "final_score": -9.0},
+                     {"rank": 2, "smiles": "CCO", "final_score": -8.5}],
+            "library": "chembl35_small (fallback for dtp)",
+        },
+    }
+    (pdir / "state.json").write_text(json.dumps(state, ensure_ascii=False))
+    (pdir / "02_screening" / "screening.json").write_text("{}")
+    # transcript with one failed tool call
+    (pdir / "agent" / "transcript.jsonl").write_text(
+        json.dumps({"step": 2, "role": "tool", "name": "dock_screen",
+                    "content": json.dumps({"ok": False,
+                                           "error": "vina exploded"})}) + "\n"
+        + json.dumps({"step": 3, "role": "tool", "name": "checkpoint",
+                      "content": json.dumps({"ok": True})}) + "\n")
+    res = runner.invoke(app, ["status", "--project", str(pdir)])
+    assert res.exit_code == 0
+    out = res.output
+    assert "[x] target_prep" in out and "[x] screening" in out
+    assert "[ ] binder" in out and "[ ] vhh" in out and "[ ] md" in out
+    assert "[ ] report" in out
+    assert "42 对接, 2 命中" in out
+    assert "fallback for dtp" in out
+    assert "02_screening/screening.json" in out  # artifacts listed
+    assert "最近错误" in out and "vina exploded" in out
+    assert "dock_screen" in out
+
+
 # ---------------------------------------------------------------- R9
 
 
@@ -74,3 +122,11 @@ def test_run_exposes_md_knobs():
     for opt in ("--md-salt", "--md-divalent", "--md-divalent-m",
                 "--md-extend-ns", "--md-max-extensions", "--md-burn-in-ps"):
         assert opt in res.output, opt
+
+
+def test_run_exposes_vhh_knobs():
+    """R11: the VHH pLDDT gate and rigid/flex docking are user-facing."""
+    res = runner.invoke(app, ["run", "--help"])
+    assert res.exit_code == 0
+    assert "--vhh-plddt-min" in res.output
+    assert "--vhh-dock-flex" in res.output

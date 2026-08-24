@@ -2577,6 +2577,20 @@ def interpret_stability(summary: dict) -> list[str]:
         else:
             notes.append("无明显柔性区 (各残基 RMSF 均低于阈值) — "
                          "整体构象刚性较好")
+    # 7) R11/R5: auto criterion for the flexible-target workflow — an apo
+    # system (no bound ligand) whose RMSF is globally elevated means the
+    # crystal structure is a poor single representative: recommend a short
+    # MD ensemble + consensus docking instead of trusting one pose.
+    if summary.get("is_ligand") is False:
+        rmsf = summary.get("rmsf_profile_mean")
+        if rmsf:
+            m_rmsf = float(np.mean(rmsf))
+            if m_rmsf > 0.25:
+                notes.append(
+                    f"自动判据 (R5): 无配体 (apo) 且平均 RMSF 偏高 "
+                    f"({m_rmsf * 10:.1f} Å > 2.5 Å) — 晶体结构不是可靠单代表, "
+                    "建议短 MD 系综 + 柔性靶点工作流 (make_flex_receptor + "
+                    "dock_conformer_set, 用 consensus 分数判命中)")
     return notes
 
 

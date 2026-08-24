@@ -12,6 +12,7 @@ from ..llm import AgentBrain
 from ..modules import screening as sc
 from ..utils import jload, jsave, pmap
 from .loop import Ctx, Tool, ToolError
+from .stages import maybe_reuse, summarize_screening
 
 
 def _brain(ctx: Ctx) -> AgentBrain | None:
@@ -444,21 +445,20 @@ def decide_hits(ctx: Ctx, n_wanted: int | None = None) -> dict:
                       "final_score": h["final_score"]} for h in hits[:3]]}
 
 
-def run_screening(ctx: Ctx) -> dict:
-    """Full deterministic screening stage (1.0 pipeline as one tool)."""
+def run_screening(ctx: Ctx, force: bool = False) -> dict:
+    """Full deterministic screening stage (1.0 pipeline as one tool).
+
+    R11/G8: reuses state.screening when it is already complete
+    (hit_decision present); force=true to re-run."""
+    cached = maybe_reuse(ctx, "screening", force)
+    if cached is not None:
+        return cached
     st = ctx.state()
     if "target_prep" not in st:
         raise ToolError("state.target_prep 未就绪 (先 run_target_prep)")
     state_out = sc.screen(st)           # returns full state
-    out = state_out["screening"]
-    ctx.save_state(screening=out)
-    return {"n_docked": out["n_docked"],
-            "reference_ligand_score": out.get("reference_ligand_score"),
-            "hit_decision": out.get("hit_decision"),
-            "n_hits": len(out.get("hits", [])),
-            "top3": [{"rank": h["rank"], "smiles": h["smiles"],
-                      "final_score": h.get("final_score")}
-                     for h in out.get("hits", [])[:3]]}
+    ctx.save_state(screening=state_out["screening"])
+    return summarize_screening(ctx.state())
 
 
 # --------------------------------------------------------------------------- #
@@ -519,7 +519,10 @@ def build() -> list[Tool]:
               "properties": {"n_wanted": {"type": "integer"}},
               "required": []}, decide_hits),
         Tool("run_screening",
-             "整段筛选 (确定性标准流程: 标准化→过滤→对接→GNINA→命中判定)。",
-             {"type": "object", "properties": {}, "required": []},
+             "整段筛选 (确定性标准流程: 标准化→过滤→对接→GNINA→命中判定)。" "已完成阶段自动复用, force=true 强制重跑。",
+             {"type": "object",
+               "properties": {"force": {"type": "boolean",
+                                        "description": "强制重跑 (默认复用已完成阶段)"}},
+               "required": []},
          run_screening),
     ]

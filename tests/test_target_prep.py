@@ -16,6 +16,20 @@ def test_analyze_completeness(hivp_pdb):
     assert "A77" in r["ligands"]
     assert r["n_chains"] == 2  # HIVp dimer
     assert r["multimer"]
+    # liganded structure: no apo_target issue
+    assert all(i["type"] != "apo_target" for i in r["issues"])
+
+
+def test_analyze_completeness_apo_target_issue(tiny_pdb):
+    """R11/R5: an apo structure carries an info-level apo_target issue so
+    the agent (and the report) knows the flexible-target criterion may
+    apply after MD."""
+    r = tp.analyze_completeness(tiny_pdb)
+    assert not r["has_ligand"]
+    apo = [i for i in r["issues"] if i["type"] == "apo_target"]
+    assert len(apo) == 1
+    assert apo[0]["severity"] == "info"
+    assert "柔性靶点" in apo[0]["suggestion"]
 
 
 def test_clean_pdb_removes_waters_ions(hivp_pdb, tmp_path):

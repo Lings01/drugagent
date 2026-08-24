@@ -6,6 +6,7 @@ from pathlib import Path
 from ..config import DEFAULTS
 from ..modules import vhh as vh
 from .loop import Ctx, Tool, ToolError
+from .stages import maybe_reuse, summarize_vhh
 
 
 def _prep(ctx: Ctx) -> dict:
@@ -53,15 +54,18 @@ def vhh_design(ctx: Ctx, n_designs: int = 2) -> dict:
                      "design": d.get("design")} for d in designs[:3]]}
 
 
-def run_vhh(ctx: Ctx) -> dict:
-    """Full deterministic VHH stage (track A + B + merged pick)."""
+def run_vhh(ctx: Ctx, force: bool = False) -> dict:
+    """Full deterministic VHH stage (track A + B + merged pick).
+
+    R11/G8: reuses state.vhh when both tracks are present; force=true to
+    re-run."""
+    cached = maybe_reuse(ctx, "vhh", force)
+    if cached is not None:
+        return cached
     st = ctx.state()
     state_out = vh.design_vhh_all(st)   # returns full state
-    out = state_out["vhh"]
-    ctx.save_state(vhh=out)
-    return {"pick": out.get("pick"),
-            "n_track_a": len(out.get("track_a_results", out.get("results", [])) or []),
-            "n_track_b": len((out.get("track_b") or {}).get("designs", []) or [])}
+    ctx.save_state(vhh=state_out["vhh"])
+    return summarize_vhh(ctx.state())
 
 
 # --------------------------------------------------------------------------- #
@@ -78,6 +82,10 @@ def build() -> list[Tool]:
               "properties": {"n_designs": {"type": "integer"}}, "required": []},
          vhh_design),
         Tool("run_vhh",
-             "整段 VHH (轨道A+轨道B+合并择优, 确定性标准流程)。",
-             {"type": "object", "properties": {}, "required": []}, run_vhh),
+             "整段 VHH (轨道A+轨道B+合并择优, 确定性标准流程)。"
+             "已完成阶段自动复用, force=true 强制重跑。",
+             {"type": "object",
+              "properties": {"force": {"type": "boolean",
+                                       "description": "强制重跑 (默认复用已完成阶段)"}},
+              "required": []}, run_vhh),
     ]

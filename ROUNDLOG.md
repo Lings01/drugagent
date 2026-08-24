@@ -17,8 +17,44 @@
 | R4 核酸原生参数化（pdb2gmx） | 已实现 | mdsim（NA 链分流） |
 | R5 平衡段（NVT→NPT）+ 收敛自动延长 | 已实现 | mdsim.run_equilibration / _md_converged / extend_replicas |
 | R5 多构象系综 → 对接 | 已实现（工具层） | tools_screen.dock_conformer_set |
+| R5 柔性工作流自动判据（apo+高RMSF→建议系综） | 已实现（第 11 轮） | target_prep.analyze_completeness (apo_target issue) / mdsim.interpret_stability |
+| G8 阶段级幂等（run_* 完成即跳过 + force） | 已实现（第 11 轮） | agent/stages.py |
+| G9 VHH 命中面（pLDDT 门槛 35/50 + fast n=80） | 已实现（第 11 轮） | config.vhh_plddt_min / modules.vhh.screen_vhh |
+| G10 VHH 刚性对接（TORSDOF 0 + 缓存一致性） | 已实现（第 11 轮） | target_prep.make_rigid_pdbqt / modules.vhh.dock_vhh_candidates |
 
-## 第 10 轮（本轮）
+## 第 11 轮（本轮）
+
+### 计划
+
+起点：第 10 轮反思优先级 G8→G9→G10→R1 域级→R5 自动判据→status 增强→
+pdbbind 修复。本轮先确认上一轮 e2e（projects/r10_e2e）：仍在运行
+（target/screening/binder 完成，VHH 对接中），收尾检查留到本轮 e2e 验证时做。
+
+| # | 目标 | 做法 |
+|---|---|---|
+| G8 | 阶段级幂等 | 新 `drugagent/agent/stages.py`：每阶段的"完成判据"（state.json 标记位）+ 缓存摘要；6 个 `run_*`/`build_report` 工具加 `force` 参数，stage json 完整 → 整体跳过。低层产物幂等（pdbqt/mdrun/xvg 缓存）不动 |
+| G9 | VHH 命中面 | 实测 100 条已建模 VHH 的 pLDDT 分布：p50=31.5 / p90=34.5 / >45 仅 1 条 → 旧 45 门槛 fast 模式只剩 1 个对接样本。fast 门槛 45→35、fast 屏 40→80、full 70→50；`vhh_plddt_min` 进 Defaults（options/CLI 可覆盖）；修 screen_vhh 写死 "pLDDT>70" 的误导日志 |
+| G10 | VHH 对接提速 | 默认**刚性**对接：全长 VHH 是 ESMFold 单模型单构象，200+ 扭转只拖慢不增益；且该 vina 构建大配体单核（R10 证据）。发现坑：此构建**所有**配体（含小分子）都要 ROOT/ENDROOT 分子图，无图 ligand 报 "Unknown or inappropriate tag" → 刚性 = `TORSDOF 0`（图保留、扭转清零），`make_rigid_pdbqt()` + PDBQT 缓存带 flex/rigid 一致性检查。`vhh_dock_flex` 可开柔性。基准：`scripts/bench_vhh_dock.py`（rigid vs flex 同条件） |
+| R5 | 柔性工作流自动判据 | 前半：`analyze_completeness` 对无配体/无金属结构加 info 级 `apo_target` issue（提示后续 MD 判据）；后半：`interpret_stability` 加判据——apo + 平均 RMSF > 2.5 Å → 自动建议"短 MD 系综 + 柔性靶点工作流"（md_summary 把 is_ligand 注入 summary） |
+| status | 命令增强 | 每阶段完成度+关键数字（对接数/命中/库名含回退标注/设计数/MD ns+final RMSD）、磁盘阶段 JSON 产物清单、最近 3 条工具失败（state.errors + transcript ok=false）、transcript 尾行 |
+| pdbbind | 库修复 | 根因查实：pdbbind.org.cn 两个 tar.gz URL 已 404（下载改为注册制 download.php），138 字节文件就是 nginx 404 页。`_setup_pdbbind` 校验大小+tar 可读、丢坏件、软失败（resolve_library 回退 chembl35_small 兜底），不再打断整体 setup |
+
+R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割算法设计 +
+独立 e2e 验证，单列一轮更稳。
+
+### 验证
+- [x] 快速套件全绿：175 通过（新增 28：stages 20 / vhh 5 / r5 2 / cli 1）
+- [ ] e2e：projects/r10_e2e 收尾验证（上轮遗留，VHH 阶段进行中）
+- [ ] G10 基准：rigid vs flex 单 VHH 对接计时（scripts/bench_vhh_dock.py）
+- [ ] 文档：README（模块 D 行/两层幂等/status/VHH 对接与 pLDDT 门槛/库回退）
+
+### 结果
+（完成后补）
+
+### 反思 / 下轮缺口
+（完成后补）
+
+## 第 10 轮
 
 ### 计划
 

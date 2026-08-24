@@ -7,6 +7,7 @@ from ..modules import target_prep as tp
 from ..modules.screening import library_path
 from ..utils import pdb_ligands
 from .loop import Ctx, Tool, ToolError
+from .stages import maybe_reuse, summarize_target_prep
 
 
 # --------------------------------------------------------------------------- #
@@ -114,16 +115,19 @@ def pdb_to_pdbqt(ctx: Ctx, pdb: str, out: str | None = None,
     return {"pdbqt": str(dst)}
 
 
-def run_target_prep(ctx: Ctx) -> dict:
-    """Full deterministic target stage (1.0 pipeline as one tool)."""
+def run_target_prep(ctx: Ctx, force: bool = False) -> dict:
+    """Full deterministic target stage (1.0 pipeline as one tool).
+
+    R11/G8: reuses state.target_prep when it is already complete
+    (force=true to re-run)."""
+    cached = maybe_reuse(ctx, "target_prep", force)
+    if cached is not None:
+        return cached
     st = ctx.state()
     state_out = tp.prepare_target(st)   # returns full state
     out = state_out["target_prep"]
     ctx.save_state(target_prep=out)
-    return {k: out.get(k) for k in
-            ("raw_pdb", "clean_pdb", "pocket", "receptor_pdb",
-             "receptor_pdbqt", "ligand_pdbqt", "ligand_resnames",
-             "judgment", "completeness")}
+    return summarize_target_prep(ctx.state())
 
 
 # --------------------------------------------------------------------------- #
@@ -191,7 +195,10 @@ def build() -> list[Tool]:
               "required": ["pdb"]}, pdb_to_pdbqt),
         Tool("run_target_prep",
              "整段靶点准备 (确定性标准流程: 解析→分析→LLM判断→清洗→口袋→pdbqt)。"
-             "需要定制时改用上面的细粒度工具。",
-             {"type": "object", "properties": {}, "required": []},
+             "需要定制时改用上面的细粒度工具。" "已完成阶段自动复用, force=true 强制重跑。",
+             {"type": "object",
+               "properties": {"force": {"type": "boolean",
+                                        "description": "强制重跑 (默认复用已完成阶段)"}},
+               "required": []},
          run_target_prep),
     ]

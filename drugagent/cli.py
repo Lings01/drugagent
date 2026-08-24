@@ -149,6 +149,8 @@ def run(
     llm_base: str = typer.Option(None, help="LLM base url 覆盖"),
     llm_model: str = typer.Option(None, help="LLM model 覆盖"),
     no_llm: bool = typer.Option(False, help="不用 LLM (确定性脚本模式)"),
+    vhh_plddt_min: float = typer.Option(None, help="VHH pLDDT 门槛 (默认 fast 35 / full 50)"),
+    vhh_dock_flex: bool = typer.Option(None, help="VHH 柔性对接 (默认刚性, R11/G10)"),
 ):
     """运行 agent (LLM 主循环驱动工具; --no-llm 退化为脚本模式)."""
     from .agent import (AgentLoop, Ctx, build_tools, goal_text,
@@ -191,6 +193,11 @@ def run(
         os.environ["DRUGAGENT_LLM_BASE_URL"] = llm_base
     if llm_model:
         os.environ["DRUGAGENT_LLM_MODEL"] = llm_model
+    # R11: VHH 旋钮透传 (resolve_defaults 会把已知 Defaults 字段叠上去)
+    if vhh_plddt_min is not None:
+        options["vhh_plddt_min"] = vhh_plddt_min
+    if vhh_dock_flex is not None:
+        options["vhh_dock_flex"] = vhh_dock_flex
 
     brain = None if no_llm else AgentBrain(project_dir=pdir)
     ctx = Ctx(pdir, brain, options, auto=auto, target=tinfo,
@@ -263,34 +270,91 @@ def resume(
 # --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #
+_STAGE_JSON = {"target_prep": "01_target", "screening": "02_screening",
+               "binder": "03_binder", "vhh": "04_vhh", "md": "05_md"}
+
+
+def _transcript_failures(tpath: Path, n: int = 3) -> list[str]:
+    """Last n failed tool calls from the transcript (content carries the
+    serialized tool result, which has ok=false on failure)."""
+    if not tpath.is_file():
+        return []
+    fails = []
+    for line in tpath.read_text(errors="ignore").splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("role") != "tool":
+            continue
+        try:
+            res = json.loads(obj.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(res, dict) and res.get("ok") is False:
+            fails.append(f"step {obj.get('step')} {obj.get('name')}: "
+                         f"{str(res.get('error'))[:160]}")
+    return fails[-n:]
+
+
+def _fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.0f} GB"
+
+
 @app.command()
 def status(project: str = typer.Option(None, help="项目目录 (默认最新)")):
-    """查看运行状态."""
+    """查看运行状态 (阶段完成度 + 关键数字 + 产物 + 最近错误)."""
+    from .agent.stages import status_lines
+
     pdir = Path(project) if project else _latest_project()
     if pdir is None:
         typer.echo("没有项目")
         return
     state = _load_state(pdir)
-    print(f"项目: {pdir}")
-    for key in ("target_prep", "screening", "binder", "vhh", "md", "report"):
-        if key == "report":
-            done = (pdir / "reports" / "report.html").exists()
-        else:
-            done = key in state
-        print(f"  [{'x' if done else ' '}] {key}")
+    typer.echo(f"项目: {pdir}")
     st = pdir / "state.json"
     if st.exists():
         d = json.loads(st.read_text())
-        print(f"状态: {d.get('status')}")
+        typer.echo(f"状态: {d.get('status')}")
+    # per-stage completion + key numbers (R11: stage-level detail)
+    for line in status_lines(state, pdir):
+        mark = "x" if line["done"] else " "
+        typer.echo(f"  [{mark}] {line['stage']:<12} {line['detail']}")
+    # stage json artifacts on disk
+    artifacts = []
+    for key, subdir in _STAGE_JSON.items():
+        jp = pdir / subdir / f"{key}.json"
+        if jp.is_file():
+            artifacts.append((str(jp.relative_to(pdir)), jp.stat().st_size))
+    report_html = pdir / "reports" / "report.html"
+    if report_html.is_file():
+        artifacts.append(("reports/report.html", report_html.stat().st_size))
+    if artifacts:
+        typer.echo("产物:")
+        for name, size in artifacts:
+            typer.echo(f"  {name} ({_fmt_size(size)})")
+    # recent tool failures (state.errors + transcript ok=false)
+    fails = [str(e) for e in state.get("errors", [])][-3:]
+    fails += _transcript_failures(pdir / "agent" / "transcript.jsonl")
+    if fails:
+        typer.echo("最近错误:")
+        for f in fails[-3:]:
+            typer.echo(f"  {f}")
     t = pdir / "agent" / "transcript.jsonl"
     if t.exists():
-        lines = t.read_text().splitlines()
-        print(f"transcript: {len(lines)} 条消息")
+        lines = t.read_text(errors="ignore").splitlines()
+        typer.echo(f"transcript: {len(lines)} 条消息")
         if lines:
             try:
                 last = json.loads(lines[-1])
-                print(f"最后: step {last.get('step')} {last.get('role')} "
-                      f"{str(last.get('name', last.get('content', '')))[:80]}")
+                typer.echo(f"最后: step {last.get('step')} {last.get('role')} "
+                           f"{str(last.get('name', last.get('content', '')))[:80]}")
             except json.JSONDecodeError:
                 pass
 

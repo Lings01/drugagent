@@ -17,6 +17,7 @@ from ..config import DEFAULTS, LIBRARIES, TOOLS, resolve_defaults
 from ..llm import AgentBrain
 from ..utils import jsave, pmap, run_cmd
 from .screening import dock_one, os_cpu
+from .target_prep import make_rigid_pdbqt, to_pdbqt
 
 # --------------------------------------------------------------------------- #
 # synthetic VHH library
@@ -117,16 +118,41 @@ def model_vhh_one(args: tuple) -> dict:
 # --------------------------------------------------------------------------- #
 # track A: screening
 # --------------------------------------------------------------------------- #
+def _pdbqt_is_flex(pdbqt: Path) -> bool:
+    """True if the ligand PDBQT has ACTIVE torsions (TORSDOF n>0).
+
+    This vina build needs the ROOT/ENDROOT graph on every ligand, so a
+    RIGID-body PDBQT is still graph-wrapped — with TORSDOF 0. Distinguish
+    by the torsion count, not by the presence of the graph."""
+    try:
+        with open(pdbqt) as fh:
+            for l in fh:
+                if l.startswith("TORSDOF"):
+                    parts = l.split()
+                    return len(parts) > 1 and int(parts[1]) > 0
+    except (OSError, ValueError):
+        pass
+    return False
+
+
 def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
-                        pocket, *, n_jobs: int = 8) -> list[dict]:
-    """R10/G7: parallel VHH -> PDBQT -> Vina docking.
+                        pocket, *, n_jobs: int = 8,
+                        flex: bool = False) -> list[dict]:
+    """R10/G7 (+R11/G10): parallel VHH -> PDBQT -> Vina docking.
 
     Was a serial for-loop: with full-length VHHs (hundreds of rotatable
     bonds) a single vina run takes minutes, so 100 candidates meant hours.
     Now joblib-parallel; each worker gets os_cpu/n_jobs threads so total
     core usage stays ~constant. Idempotent: an existing <idx>.pdbqt is
-    reused. Returns the candidate dicts updated with the docking result."""
-    from ..modules.target_prep import to_pdbqt
+    reused — but a stale file whose flex/rigid mode does not match the
+    requested `flex` is reconverted.
+
+    R11/G10: `flex=False` (default) docks each VHH as a RIGID body. A
+    folded domain from a single ESMFold model carries one conformation, so
+    the torsional search space buys little while dominating the runtime
+    (this vina build also runs single-core on large ligands — `--cpu 64`
+    measured 1 core, see ROUNDLOG R10). Returns the candidate dicts
+    updated with the docking result."""
     if not ok:
         return []
     n_jobs = max(1, min(n_jobs, len(ok), 16))
@@ -135,10 +161,14 @@ def dock_vhh_candidates(ok: list[dict], model_dir: Path, rec_pdbqt,
     def _dock(r: dict) -> dict:
         pdb = model_dir / f"vhh_{r['idx']}.pdb"
         lig_pdbqt = model_dir / f"vhh_{r['idx']}.pdbqt"
+        if lig_pdbqt.is_file() and _pdbqt_is_flex(lig_pdbqt) != flex:
+            lig_pdbqt.unlink()
         if not lig_pdbqt.is_file():
-            to_pdbqt(pdb, lig_pdbqt)
-        # full VHH is a huge "ligand" (100s of rotatable bonds); scale
-        # exhaustiveness down or docking takes hours per candidate
+            to_pdbqt(pdb, lig_pdbqt)          # graph + element fixes
+            if not flex:
+                make_rigid_pdbqt(lig_pdbqt)   # TORSDOF 0 -> rigid body
+        # full VHH is a huge "ligand"; scale exhaustiveness down or docking
+        # takes hours per candidate (even rigid, >100 atoms is a big grid)
         n_atoms = sum(1 for l in open(lig_pdbqt) if l.startswith("ATOM"))
         exh = 8 if n_atoms < 100 else 1
         prefix = model_dir / f"vhh_{r['idx']}_dock"
@@ -153,12 +183,13 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
     prep = state["target_prep"]
     pocket = prep["pocket"]
     rec_pdbqt = prep["receptor_pdbqt"]
+    d = resolve_defaults(state.get("options") or {})
 
     lib_path = LIBRARIES / "vhh_library.fasta"
     if lib_path.exists():
         seqs = load_fasta(lib_path)
     else:
-        seqs = generate_vhh_library(int(resolve_defaults(state.get("options") or {}).vhh_lib_size))
+        seqs = generate_vhh_library(int(d.vhh_lib_size))
         save_library(seqs, lib_path)
     seqs = seqs[:n]
     logger.info(f"VHH track A: screening {len(seqs)} sequences")
@@ -169,19 +200,21 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
                    [(i, s, str(model_dir)) for i, s in enumerate(seqs)],
                    n_jobs=n_jobs)
     ok = [r for r in results if r["ok"]]
-    # pLDDT filter (relaxed in fast mode for synthetic libraries)
-    plddt_min = float(state.get("options", {}).get(
-        "vhh_plddt_min", 45.0 if state.get("options", {}).get("fast") else 70.0))
+    # pLDDT filter — R11/G9: default comes from config (fast 35 / full 50),
+    # overridable via options.vhh_plddt_min
+    plddt_min = float(d.vhh_plddt_min)
     ok = [r for r in ok if r["plddt"] > plddt_min]
     ok.sort(key=lambda r: r["plddt"], reverse=True)
-    ok = ok[: int(state.get("options", {}).get("vhh_screen_n", 100))]
-    logger.info(f"VHH modeling: {len(results)} total, {len(ok)} pass pLDDT>70 and top-n")
+    ok = ok[: int(d.vhh_screen_n)]
+    logger.info(f"VHH modeling: {len(results)} total, {len(ok)} pass "
+                f"pLDDT>{plddtt_min:g} and top-{int(d.vhh_screen_n)}")
 
-    # dock (R10/G7: parallel — the serial loop made Module D a 3-hour
-    # bottleneck: a full VHH is a ~700-atom "ligand" and each vina call
-    # takes minutes even at exhaustiveness 1)
+    # dock (R10/G7: parallel; R11/G10: rigid bodies by default — a full
+    # VHH is a ~700-atom "ligand" and flexible torsions + this vina build's
+    # single-core big-ligand behavior made each call 15-30 min)
+    flex = bool(d.vhh_dock_flex)
     docked_all = dock_vhh_candidates(ok, model_dir, rec_pdbqt, pocket,
-                                     n_jobs=n_jobs)
+                                     n_jobs=n_jobs, flex=flex)
     docked = [r for r in docked_all if r.get("ok")]
     docked.sort(key=lambda r: r.get("score", 0))
     return {
