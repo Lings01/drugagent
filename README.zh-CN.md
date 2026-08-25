@@ -64,6 +64,12 @@ drugagent report --project projects/<项目>
 零基础用户请从 [TUTORIAL.zh-CN.md](TUTORIAL.zh-CN.md) 开始（含逐参数解释、报告读法、
 数字可信度指南、FAQ、术语表）。
 
+**在当前文件夹下跑**：加 `--root .`（项目建在 `./<名字>/`，而不是部署
+目录的 `projects/`；工具/权重仍留在部署目录不动）。
+`status/resume/rerun/report` 能用裸项目名找到它们（依次在 `--root`、
+当前目录、部署 projects/ 下查找）。想固定默认输出目录：
+`export DRUGAGENT_PROJECTS_ROOT=~/mywork`。
+
 常用 `run` 参数：`--library dtp|chembl35|pdbbind|<SDF路径>`，`--n-jobs 32`，
 `--md-ns 100 --md-reps 3`，`--max-steps 300`（agent 步数预算），
 `--no-llm`（确定性脚本模式），`--llm-base/--llm-model`（覆盖 LLM）。

@@ -44,7 +44,11 @@ LIBRARIES = DATA / "libraries"
 WEIGHTS = DATA / "weights"
 MODELS = DATA / "models"
 TOOLS = DATA / "tools"
-PROJECTS = ROOT / "projects"
+# Project output root. DRUGAGENT_PROJECTS_ROOT lets the user run from a
+# different working directory (projects land in <root>/<name>); the
+# deployment root (env/data/tools) stays where it is.
+_projects_env = os.environ.get("DRUGAGENT_PROJECTS_ROOT")
+PROJECTS = Path(_projects_env).expanduser() if _projects_env else ROOT / "projects"
 LOGS = ROOT / "logs"
 ENV_DIR = ROOT / "env"
 

@@ -68,6 +68,12 @@ drugagent report --project projects/<project>
 New users: start with [TUTORIAL.md](TUTORIAL.md) (per-parameter explanations,
 how to read the report, number-reliability guide, FAQ, glossary).
 
+**Run in the current folder**: add `--root .` (projects are created in
+`./<name>/` instead of the deploy `projects/` dir; tools/weights stay put).
+`status/resume/rerun/report` find such projects by bare name (checked
+under `--root`, then the current directory, then the deploy dir). A
+persistent default: `export DRUGAGENT_PROJECTS_ROOT=~/mywork`.
+
 Common `run` options: `--library dtp|chembl35|pdbbind|<SDF path>`,
 `--n-jobs 32`, `--md-ns 100 --md-reps 3`, `--max-steps 300` (agent step
 budget), `--no-llm` (deterministic scripted mode), `--llm-base/--llm-model`

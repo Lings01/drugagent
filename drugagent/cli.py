@@ -53,26 +53,34 @@ def _parse_target(value: str) -> dict:
         f"无法识别的靶点输入: {v!r} (支持: PDB文件路径 / PDB ID / FASTA / 裸序列)")
 
 
-def _project_dir(name: str | None) -> Path:
+def _project_dir(name: str | None, root: str | None = None) -> Path:
+    """Project dir under --root (run-in-current-folder) or the deploy
+    projects/ dir by default."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     slug = name or f"run_{stamp}"
-    p = PROJECTS / slug
+    base = Path(root).expanduser() if root else PROJECTS
+    p = (base / slug).resolve()
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-def _resolve_project(v: str | None) -> Path | None:
+def _resolve_project(v: str | None, root: str | None = None) -> Path | None:
     """--project: an existing path (abs or rel to CWD), or a bare project
-    NAME resolved under PROJECTS — so `drugagent status --project rigid_ubq`
-    works from any working directory (installed entry-point usage)."""
+    NAME resolved under --root, then the current directory, then the deploy
+    projects/ — so `drugagent status --project myproj` works from any
+    working directory (installed entry-point usage)."""
     if v is None:
-        return _latest_project()
+        return _latest_project(root)
     p = Path(v)
     if p.is_dir():
-        return p
-    cand = PROJECTS / v
-    if cand.is_dir():
-        return cand
+        return p.resolve()  # absolute, even for a CWD-relative input
+    cands = []
+    if root:
+        cands.append(Path(root).expanduser() / v)
+    cands += [Path.cwd() / v, PROJECTS / v]
+    for c in cands:
+        if c.is_dir():
+            return c
     return p  # does not exist; caller's error handling reports it
 
 
@@ -167,7 +175,9 @@ def run(
     vhh_plddt_min: float = typer.Option(None, help="VHH pLDDT 门槛 (默认 fast 35 / full 50)"),
     vhh_dock_flex: bool = typer.Option(None, help="VHH 柔性对接 (默认刚性, R11/G10)"),
     vhh_dock_cdr_only: bool = typer.Option(None, help="VHH CDR 片段对接 (fast 默认开, R11/G10-v2)"),
+    root: str = typer.Option(None, help="项目输出根目录 (项目建在 <root>/<name>；默认部署 projects/；也可用 DRUGAGENT_PROJECTS_ROOT)"),
 ):
+
     """运行 agent (LLM 主循环驱动工具; --no-llm 退化为脚本模式)."""
     from .agent import (AgentLoop, Ctx, build_tools, goal_text,
                         system_prompt)
@@ -180,7 +190,7 @@ def run(
         tinfo["value"] = str(Path(tinfo["value"]).resolve())
     mods = (sorted(set(m.strip() for m in modules.split(",")))
             if modules != "all" else DEFAULT_MODULES)
-    pdir = _project_dir(name)
+    pdir = _project_dir(name, root=root)
     logger.info(f"project: {pdir}")
 
     d = DEFAULTS.resolved(fast)
@@ -252,13 +262,14 @@ def run(
 def resume(
     project: str = typer.Option(..., help="项目目录"),
     auto: bool = typer.Option(False, help="检查点自动通过"),
+    root: str = typer.Option(None, help="项目输出根目录 (项目建在 <root>/<name>；默认部署 projects/；也可用 DRUGAGENT_PROJECTS_ROOT)"),
 ):
     """恢复 agent 运行 (重放 transcript, 从断点继续)."""
     from .agent import AgentLoop, Ctx, build_tools, goal_text, system_prompt
     from .agent.loop import scripted_run
     from .llm import AgentBrain
 
-    pdir = _resolve_project(project)
+    pdir = _resolve_project(project, root=root)
     state = _load_state(pdir)
     options = state.get("options", {})
     tinfo = state.get("target", {})
@@ -297,10 +308,11 @@ _STAGE_TOOL = {"target_prep": "run_target_prep", "screening": "run_screening",
 def rerun(project: str = typer.Option(None, help="项目目录 (默认最新)"),
           stage: str = typer.Option(..., help="要重跑的阶段: "
           "target_prep|screening|binder|vhh|md|report"),
-          with_report: bool = typer.Option(True, help="阶段成功后重建报告")):
+          with_report: bool = typer.Option(True, help="阶段成功后重建报告"),
+          root: str = typer.Option(None, help="项目输出根目录 (项目建在 <root>/<name>；默认部署 projects/；也可用 DRUGAGENT_PROJECTS_ROOT)"),):
     """强制重跑单个阶段 (G8: force=true 绕过 stage 复用; 其余阶段产物不动)."""
     from .agent import Ctx, build_tools
-    pdir = _resolve_project(project)
+    pdir = _resolve_project(project, root=root)
     if pdir is None:
         typer.echo("没有项目")
         raise typer.Exit(1)
@@ -380,11 +392,13 @@ def _fmt_size(n: int) -> str:
 
 
 @app.command()
-def status(project: str = typer.Option(None, help="项目目录 (默认最新)")):
+def status(project: str = typer.Option(None, help="项目目录 (默认最新)"),
+    root: str = typer.Option(None, help="项目输出根目录 (项目建在 <root>/<name>；默认部署 projects/；也可用 DRUGAGENT_PROJECTS_ROOT)"),
+):
     """查看运行状态 (阶段完成度 + 关键数字 + 产物 + 最近错误)."""
     from .agent.stages import status_lines
 
-    pdir = _resolve_project(project)
+    pdir = _resolve_project(project, root=root)
     if pdir is None:
         typer.echo("没有项目")
         return
@@ -431,10 +445,11 @@ def status(project: str = typer.Option(None, help="项目目录 (默认最新)")
                 pass
 
 
-def _latest_project() -> Path | None:
-    if not PROJECTS.exists():
+def _latest_project(root: str | None = None) -> Path | None:
+    base = Path(root).expanduser() if root else PROJECTS
+    if not base.exists():
         return None
-    runs = sorted([p for p in PROJECTS.iterdir() if p.is_dir()],
+    runs = sorted([p for p in base.iterdir() if p.is_dir()],
                   key=lambda p: p.stat().st_mtime)
     return runs[-1] if runs else None
 
@@ -443,10 +458,12 @@ def _latest_project() -> Path | None:
 # report
 # --------------------------------------------------------------------------- #
 @app.command()
-def report(project: str = typer.Option(..., help="项目目录")):
+def report(project: str = typer.Option(..., help="项目目录"),
+    root: str = typer.Option(None, help="项目输出根目录 (项目建在 <root>/<name>；默认部署 projects/；也可用 DRUGAGENT_PROJECTS_ROOT)"),
+):
     """(重新)生成 HTML + PDF 报告."""
     from .report import report as report_mod
-    pdir = _resolve_project(project)
+    pdir = _resolve_project(project, root=root)
     state = _load_state(pdir)
     out = report_mod.build_report(state)
     typer.echo(f"HTML: {out['html']}")

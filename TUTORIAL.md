@@ -407,6 +407,7 @@ the LLM and recorded. `--no-llm` mode uses defaults.
 
 | Option | Default | Description |
 |---|---|---|
+| `--root` | deploy `projects/` | output root dir: project created at `<root>/<name>` — use `--root .` to run in the current folder (env var `DRUGAGENT_PROJECTS_ROOT` for a persistent default) |
 | `--target` | (required) | PDB ID / PDB path / FASTA / raw sequence |
 | `--modules` | `all` | `screen,binder,vhh,md` comma-separated subset |
 | `--fast / --no-fast` | full | validation scale vs production scale |

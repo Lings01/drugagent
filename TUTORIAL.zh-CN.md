@@ -354,6 +354,7 @@ binder 类型——都由 LLM 决定并留痕；`--no-llm` 模式用默认值。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
+| `--root` | 部署 projects/ | 项目输出根目录：项目建在 `<root>/<name>`——`--root .` 即在当前文件夹下跑（环境变量 `DRUGAGENT_PROJECTS_ROOT` 可固定默认） |
 | `--target` | （必填） | PDB ID / PDB 路径 / FASTA / 裸序列 |
 | `--modules` | `all` | `screen,binder,vhh,md` 逗号子集 |
 | `--fast / --no-fast` | full | 验证规模 vs 生产规模 |
