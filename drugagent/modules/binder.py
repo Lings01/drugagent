@@ -83,11 +83,24 @@ def rfdesign(
     hotspots: list[str] | None = None,
     seed: int = 0,
     env: str | None = None,
+    rf_cautious: bool = False,
 ) -> list[Path]:
-    """Run RFdiffusion binder design. Returns list of design PDBs."""
+    """Run RFdiffusion binder design. Returns list of design PDBs.
+
+    R16/P3: rf_cautious=True skips the (expensive, ~20 min on CPU) RF
+    run when at least n_designs top-level design PDBs already exist —
+    symmetry with vhh_rf_cautious, whose RF scaffold-guided mode
+    skips existing designs by default. Default False keeps the
+    always-resample behavior (deterministic=False)."""
     repo = rf_repo()
     outdir = workdir / "rf_designs"
     outdir.mkdir(parents=True, exist_ok=True)
+    existing = sorted(p for p in outdir.glob("design_*.pdb")
+                      if p.stem.split("_")[-1].isdigit())
+    if rf_cautious and len(existing) >= n_designs:
+        logger.info(f"rf_cautious: reusing {len(existing)} existing "
+                    f"designs in {outdir.name} (skip RF run)")
+        return existing
 
     # RFdiffusion expects target on chain A (hotspot refs use chain A)
     target_a = workdir / "rf_target.pdb"
@@ -406,9 +419,11 @@ def design_binder(state: dict) -> dict:
     hotspots = pocket_hotspots(Path(prep["clean_pdb"]), pocket)
     n_designs = int(opts.get("n_binder_designs", d.n_binder_designs))
 
+    # R16/P3: binder_rf_cautious (default false = always re-sample)
     designs = rfdesign(
         Path(prep["clean_pdb"]), pocket, workdir,
         n_designs=n_designs, length=length, hotspots=hotspots,
+        rf_cautious=bool(opts.get("binder_rf_cautious", False)),
     )
     if not designs:
         raise RuntimeError("RFdiffusion produced no designs")

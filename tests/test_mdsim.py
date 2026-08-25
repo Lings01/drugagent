@@ -1519,3 +1519,102 @@ def test_ss_trajectory_units_are_nm(hivp_pdb, tmp_path):
     # box 5.9 nm) — 53 would mean Angstrom leaked through
     extent = ca.max(axis=0) - ca.min(axis=0)
     assert extent.max() < 8.0, f"extent {extent.max():.1f} nm too large"
+
+
+def test_md_unit_sentinel_mda_vs_gmx(tmp_path):
+    """R16/P2: unit sentinel. MDA-based CA self-fit RMSD (nm) and a
+    gmx rms run with the SAME frame-0 reference must agree within a
+    factor of 2 at the final frame — different atom sets (CA vs
+    backbone) and wrapping conventions prevent exact equality, but a
+    10x Angstrom/nm unit regression shows up as a ratio of ~0.1 or ~10.
+    Cross-tool guard against the R15/P0 unit bug recurring.
+
+    (The pre-computed analysis/rmsd_r1.xvg is NOT used here: it fits
+    against the TPR reference, which in r10_e2e is a stale placement
+    ~2 nm from xtc frame 0 and inflates the series.)"""
+    import numpy as np
+    from drugagent.modules.mdsim import (
+        _ss_backbone_trajectory, _kabsch_rmsd, _parse_xvg, run_cmd,
+        gromacs)
+    base = Path("projects/r10_e2e/05_md")
+    tpr, xtc = base / "md_rep1" / "md.tpr", base / "md_rep1" / "md.xtc"
+    if not (tpr.is_file() and xtc.is_file()):
+        pytest.skip("r10_e2e trajectory not present")
+    try:
+        gmx = gromacs()["gmx"]
+    except FileNotFoundError:
+        pytest.skip("gromacs not available")
+    # gmx works on wrapped coordinates; in this tight box (the protein
+    # nearly fills it) a chain drifting across a box boundary flaps
+    # (phantom ~box-vector distances) and inflates the RMSD ~10x.
+    # Unwrap first (compound-com) and use the unwrapped trajectory's own
+    # frame 0 as the reference, so both tools compare the same physical
+    # frames under one PBC policy.
+    unwrapped = tmp_path / "unwrapped.xtc"
+    run_cmd([gmx, "trjconv", "-s", str(tpr), "-f", str(xtc),
+             "-ur", "compact", "-o", str(unwrapped), "-pbc", "mol"],
+            stdin="System\n", log_file=tmp_path / "trj.log")
+    ref0 = tmp_path / "ref_unw0.pdb"
+    run_cmd([gmx, "trjconv", "-s", str(tpr), "-f", str(unwrapped),
+             "-b", "0", "-dt", "100000", "-o", str(ref0)],
+            stdin="System\n", log_file=tmp_path / "ref.log")
+    out = tmp_path / "sentinel.xvg"
+    run_cmd([gmx, "rms", "-s", str(ref0), "-f", str(unwrapped),
+             "-o", str(out), "-fit", "rot+trans"],
+            stdin="Backbone\nBackbone\n",
+            log_file=tmp_path / "rms.log")
+    t, y = _parse_xvg(out)
+    gmx_final = float(np.asarray(y, dtype=float)[-1])  # nm
+    coords = _ss_backbone_trajectory(tpr, xtc)
+    ca = coords[:, :, 1, :]
+    F = coords.shape[0]
+    mda_final = float(_kabsch_rmsd(ca[F - 1], ca[0]))  # nm by construction
+    # MDA measures CA only (less mobile) with per-atom unwrap; gmx
+    # measures full backbone with compound-com unwrap. On r10_e2e the
+    # baseline ratio is 0.13-0.40 across replicas (method gap, not
+    # units). A 10x unit regression shows up as ~1.3-4 or ~0.01-0.04.
+    ratio = mda_final / max(gmx_final, 1e-6)
+    assert 0.05 <= ratio <= 1.0, (
+        f"unit sentinel: MDA final={mda_final:.3f} nm vs gmx "
+        f"{gmx_final:.3f} nm (ratio {ratio:.2f})")
+
+
+def test_select_system_apo_fallback(hivp_pdb, tmp_path):
+    """R16/P0: a pure-protein target (no ligand, no screening/binder/vhh)
+    must yield an 'apo' MD choice instead of 'no MD system candidates'."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    # pure protein: strip the A77 ligand so target_prep reports no ligands
+    rec = tmp_path / "apo.pdb"
+    from drugagent.modules.target_prep import _remove_res
+    _remove_res(hivp_pdb, rec, ["A77"])
+    state = {"project_dir": str(proj),
+             "target_prep": {"clean_pdb": str(rec),
+                             "ligand_pdbqt": None,
+                             "ligand_resnames": []},
+             "options": {"no_llm": True}}
+    choice = md.select_system(state, None)
+    assert choice["name"] == "apo", choice
+    assert choice["ligand"] is False
+
+
+def test_build_complex_apo(hivp_pdb, tmp_path):
+    """R16/P0: the apo complex is the target protein only (waters and
+    any crystallographic ligand dropped, native chain labels kept)."""
+    rec = tmp_path / "apo.pdb"
+    from drugagent.modules.target_prep import _remove_res
+    _remove_res(hivp_pdb, rec, ["A77"])
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state = {"project_dir": str(proj),
+             "target_prep": {"clean_pdb": str(rec),
+                             "ligand_pdbqt": None,
+                             "ligand_resnames": []}}
+    out = md.build_complex_pdb(state, {"name": "apo", "ligand": False},
+                               tmp_path / "w")
+    txt = out.read_text()
+    assert "A77" not in txt
+    # HIV-PR dimer keeps its two native chains
+    chains = {l[21] for l in txt.splitlines()
+              if l.startswith(("ATOM", "HETATM"))}
+    assert chains == {"A", "B"}, chains

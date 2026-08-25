@@ -227,3 +227,33 @@ def test_repair_drop_metals(tmp_path):
 def test_analyze_includes_issues(hivp_pdb):
     r = tp.analyze_completeness(hivp_pdb)
     assert "issues" in r  # 1HVI is clean-ish; just ensure key present
+
+
+def test_prepare_target_no_ligand(tmp_path, monkeypatch):
+    """R16/P0: a pure-protein PDB (no ligand) must not crash with
+    UnboundLocalError on 'lig_pdb' — ligand_pdb/ligand_pdbqt come back
+    None and the pocket falls back to a surface heuristic."""
+    def _stub_pdbqt(pdb, out, **kw):
+        out.write_text("stub")
+        return out
+    monkeypatch.setattr(tp, "to_pdbqt", _stub_pdbqt)
+    # 30-residue protein, no HETATM
+    lines = []
+    serial = 0
+    for i in range(30):
+        for name in ("N", "CA", "C"):
+            serial += 1
+            lines.append(_atom(serial, name, "ALA", "A", i + 1,
+                               x=float(i * 3.8), y=0.0, z=0.0))
+    pdb = tmp_path / "protein.pdb"
+    pdb.write_text("\n".join(lines) + "\nEND\n")
+    state = {"project_dir": str(tmp_path / "proj"),
+             "target": {"kind": "pdb_file", "value": str(pdb)},
+             "options": {"no_llm": True}}
+    out = tp.prepare_target(state)
+    prep = out["target_prep"]
+    assert prep["ligand_resnames"] == []
+    assert prep["ligand_pdb"] is None
+    assert prep["ligand_pdbqt"] is None
+    assert prep["receptor_pdbqt"].endswith(".pdbqt")
+    assert prep["pocket"], "pocket must still be produced (surface fallback)"

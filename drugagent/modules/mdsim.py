@@ -96,6 +96,14 @@ def select_system(state: dict, brain: AgentBrain | None) -> dict:
             "label": "靶点 + 设计的纳米抗体（蛋白-蛋白复合物）",
             "ligand": False,
         })
+    # R16/P0: ligand-free targets have no complex of their own — the apo
+    # protein is still a valid MD system (flexibility/hinge baseline)
+    if not prep.get("ligand_pdbqt"):
+        choices.append({
+            "name": "apo",
+            "label": "apo 靶点（无配体，蛋白单独 MD — 柔性/铰链基线）",
+            "ligand": False,
+        })
     if not choices:
         raise RuntimeError("no MD system candidates; provide a complex PDB")
 
@@ -181,6 +189,14 @@ def build_complex_pdb(state: dict, choice: dict, workdir: Path) -> Path:
         _remove_res(target_pdb, rec, prep.get("ligand_resnames", []) + ["HOH", "WAT"])
         txt = _chain_lines(rec, None) + _chain_lines(lig_pdb, lig_chain) + "END\n"
         out.write_text(txt)
+        return _fix_c_term(out)
+    # R16/P0: apo — the target alone (no ligand, no design)
+    if choice["name"] == "apo":
+        from ..modules.target_prep import _remove_res
+        rec = workdir / "receptor_only.pdb"
+        _remove_res(target_pdb, rec,
+                    prep.get("ligand_resnames", []) + ["HOH", "WAT"])
+        out.write_text(_chain_lines(rec, None) + "END\n")
         return _fix_c_term(out)
     # protein-protein: prefer the ESMFold-refined design (chain B of the
     # scored complex) over the raw RFdiffusion output, which can contain

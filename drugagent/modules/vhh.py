@@ -540,6 +540,55 @@ def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
     return scored
 
 
+def _scaffold_ca(scaffold_dir: Path) -> list[list[float]] | None:
+    """R16/P1: CA coordinates (A) of the first scaffold PDB (chain A)."""
+    try:
+        ids_file = scaffold_dir / "scaffold_ids.txt"
+        ids = [l.strip() for l in ids_file.read_text().splitlines()
+               if l.strip()]
+        pdb = scaffold_dir / f"{ids[0]}.pdb" if ids else None
+        if pdb is None or not pdb.is_file():
+            return None
+        out: list[list[float]] = []
+        for line in pdb.read_text().splitlines():
+            if line.startswith("ATOM") and line[12:16].strip() == "CA" \
+                    and line[21] == "A":
+                out.append([float(line[30:38]), float(line[38:46]),
+                            float(line[46:54])])
+        return out or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def scaffold_fidelity(pdb: Path, scaffold_ca: list[list[float]] | None) -> float | None:
+    """R16/P1: Kabsch RMSD (A) of the designed chain CA trace against the
+    scaffold CA trace. With denoiser.noise_scale_ca=0 the design should
+    hug the scaffold (RMSD ~ PDB precision); a large value means RF did
+    not actually pin the scaffold. None when uncomparable (missing
+    scaffold, <2 CA chains, length mismatch)."""
+    import numpy as np
+    from ..modules.binder import _design_chain
+    coords: dict[str, list] = {}
+    for line in Path(pdb).read_text().splitlines():
+        if line.startswith("ATOM") and line[12:16].strip() == "CA":
+            coords.setdefault(line[21], []).append(
+                [float(line[30:38]), float(line[38:46]),
+                 float(line[46:54])])
+    if not scaffold_ca or len(coords) < 1:
+        return None
+    try:
+        dch = _design_chain(Path(pdb))
+    except Exception:  # noqa: BLE001
+        return None
+    if dch not in coords or len(coords[dch]) != len(scaffold_ca):
+        return None
+    from ..modules.mdsim import _kabsch_rmsd
+    d = np.array(coords[dch], dtype=float)
+    s = np.array(scaffold_ca, dtype=float)
+    # _kabsch_rmsd is scale-invariant: Å in -> Å out (no conversion)
+    return round(float(_kabsch_rmsd(d, s)), 2)
+
+
 def _scaffold_sequence(scaffold_dir: Path) -> str | None:
     """R15: 1-letter sequence of the first scaffold PDB (chain A) in the
     scaffold dir — the designed chain preserves it (scaffold-guided mode)
@@ -637,6 +686,13 @@ def design_vhh(state: dict, workdir: Path, *, n_designs: int) -> dict:
     seqs = {p.stem: [scaffold_seqs] for p in designs} if scaffold_seqs else {}
     # score each design with ESMFold complex (R13: cached in scored.json)
     scored = score_designs(designs, outdir, Path(prep["clean_pdb"]), seqs)
+    # R16/P1: how faithfully does each design preserve the scaffold
+    # backbone? (sequence is fixed by scaffold-guided mode, but the
+    # backbone drift is not visible anywhere else in the pipeline)
+    scaf_ca = _scaffold_ca(scaffold_dir)
+    for entry in scored:
+        entry["scaffold_rmsd_a"] = scaffold_fidelity(Path(entry["design"]),
+                                                     scaf_ca)
     scored.sort(key=lambda x: (x.get("interface_plddt_mean") or 0), reverse=True)
     return {"track": "B_de_novo", "n_designs": len(designs), "designs": scored[:10]}
 

@@ -745,3 +745,75 @@ def test_design_vhf_rf_cautious(tmp_path, monkeypatch):
     seen.clear()
     vh.design_vhh(state, wd, n_designs=2)
     assert "vhh_design_2.pdb" in seen["top_level"], seen
+
+
+def test_design_scaffold_fidelity_field(tmp_path, monkeypatch):
+    """R16/P1: each track-B design entry carries scaffold_rmsd_a — the
+    Kabsch RMSD (A) of the designed chain CA trace against the scaffold
+    PDB CA trace. With denoiser.noise_scale_ca=0 the design should stay
+    close to the scaffold; a large value means RF did not actually pin
+    the scaffold (or the scaffold file is not what we think it is).
+    None when the scaffold is missing or lengths mismatch."""
+    from drugagent.modules import vhh as vh
+    from drugagent.modules import binder as binder_mod
+    from drugagent.modules import esmfold_run as esm
+    import numpy as np
+    wd = tmp_path / "04_vhh"
+    outdir = wd / "vhh_designs"
+    outdir.mkdir(parents=True)
+    (tmp_path / "clean.pdb").write_text("ATOM      1  CA GLY A  1\nEND\n")
+    def _ca_line(serial, chain, res, x, y, z):
+        return (f"ATOM  {serial:>5d}  CA  GLY {chain}{res:>4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{0.00:6.2f}")
+    # a "scaffold" PDB: 10 CAs in a line on chain A
+    scaf = ("\n".join(_ca_line(i + 1, "A", i + 1, i * 3.8, 0.0, 0.0)
+                        for i in range(10)) + "\nEND\n")
+    # design: the same trace shifted +100 A with 0.2 A jitter (chain A)
+    # and a target chain B 20 A away
+    import random
+    random.seed(0)
+    des_lines = [_ca_line(i + 1, "A", i + 1,
+                          100.0 + i * 3.8 + random.uniform(-0.2, 0.2),
+                          random.uniform(-0.2, 0.2),
+                          random.uniform(-0.2, 0.2))
+                 for i in range(10)]
+    des_lines += [_ca_line(11 + i, "B", i + 1, 100.0 + i * 3.8, 20.0, 0.0)
+                  for i in range(10)]
+    (outdir / "vhh_design_0.pdb").write_text("\n".join(des_lines) + "END\n")
+
+    def fake_run_cmd(cmd, **kw):
+        return 0
+
+    monkeypatch.setattr(vh, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(binder_mod, "rf_repo", lambda: tmp_path)
+    monkeypatch.setattr(binder_mod, "rf_python", lambda: "/bin/true")
+    monkeypatch.setattr(binder_mod, "pocket_hotspots", lambda *a: ["A1"])
+    monkeypatch.setattr(binder_mod, "_chain_ids", lambda p: ["A"])
+    monkeypatch.setattr(binder_mod, "_ca_sequence", lambda p, c: "G" * 10)
+    monkeypatch.setattr(binder_mod, "_make_complex",
+                        lambda a, b, o: open(o, "w").write("MODEL") or o)
+    monkeypatch.setattr(esm, "predict",
+                        lambda seqs, **kw: {"mean_plddt": 60.0,
+                                            "plddt": [70.0] * 10,
+                                            "pdb": "X"})
+    monkeypatch.setattr(esm, "interface_metrics",
+                        lambda comp, p: {"interface_plddt_mean": 50.0,
+                                         "interface_plddt_min": 40.0,
+                                         "n_interface_residues": 3})
+    # scaffold dir with a 10-mer scaffold (length matches the design);
+    # design_vhh resolves scaffold_dir = TOOLS / "vhh_scaffolds"
+    sdir = tmp_path / "vhh_scaffolds"
+    sdir.mkdir()
+    (sdir / "scaffold_ids.txt").write_text("scaf0\n")
+    (sdir / "scaf0.pdb").write_text(scaf)
+    monkeypatch.setattr(vh, "TOOLS", tmp_path)
+    state = {"options": {"fast": True},
+             "target_prep": {"clean_pdb": str(tmp_path / "clean.pdb"),
+                             "pocket": {"center": [0, 0, 0], "xsize": 10,
+                                        "ysize": 10, "zsize": 10}}}
+    out = vh.design_vhh(state, wd, n_designs=1)
+    entry = out["designs"][0]
+    assert "scaffold_rmsd_a" in entry, entry.keys()
+    # 0.2 A jitter -> RMSD well under 1 A
+    assert entry["scaffold_rmsd_a"] is not None
+    assert entry["scaffold_rmsd_a"] < 1.0, entry["scaffold_rmsd_a"]

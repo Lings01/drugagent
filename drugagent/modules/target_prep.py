@@ -816,6 +816,9 @@ def prepare_target(state: dict) -> dict:
                               flex=False)  # rigid receptor: no graph keywords
 
     # ligand pdbqt (for positive control / MD)
+    # R16/P0: lig_pdb must exist for the no-ligand (pure protein) path,
+    # where the out-dict references it below
+    lig_pdb = None
     lig_pdbqt = None
     if ligands:
         lig_pdb = workdir / "ligand.pdb"

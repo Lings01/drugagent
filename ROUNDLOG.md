@@ -25,6 +25,11 @@
 | G10-v3 片段拆分 + 自适应盒子（撞墙罚分消失） | 已实现（第 12 轮） | modules.vhh._frag_box / vhh_cdr_fragments(max_res) |
 | R1 真·结构域 RMSD（SS 域提取 + 域自拟合 Kabsch） | 已实现（第 12 轮） | mdsim.find_ss_domains / domain_rmsd_series / analyze_ss / interpret 注 8 |
 | G8 收尾：rerun --stage X（force CLI 化） | 已实现（第 12 轮） | cli.rerun |
+| R1 纯蛋白靶点 apo MD 通路（select_system/build apo 分支） | 已实现（第 16 轮） | mdsim.select_system / build_complex_pdb |
+| R1 scaffold 保真度字段 scaffold_rmsd_a（Kabsch Å） | 已实现（第 16 轮） | vhh.scaffold_fidelity / design_vhh |
+| G8 对称：binder_rf_cautious 选项 | 已实现（第 16 轮） | binder.rfdesign(rf_cautious) |
+| R1 单位哨兵（MDA vs gmx self-fit 比值带） | 已实现（第 16 轮） | tests/test_mdsim.py::test_md_unit_sentinel_mda_vs_gmx |
+| R1 跨靶点刚性基线（ubq apo 2ns×3） | 已实现（第 16 轮，数据） | projects/rigid_ubq + ROUNDLOG 标定表 |
 
 ## 第 12 轮（本轮）
 
@@ -521,3 +526,98 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
 4. **binder 设计多样性**：`deterministic=False` 但每次 rerun 都重跑 RF
    （03_binder 无设计缓存——与 vhh 的 cautious 模式不对称）。R16 可给
    binder 加同款 cautious/归档选项统一行为。
+
+# 第 16 轮
+
+## 计划
+| # | 优先级 | 任务 | 依据（第 15 轮反思） |
+|---|--------|------|----------------------|
+| P1 | 高 | scaffold 序列保留验证 + 保真度守卫（fidelity 字段进 state/报告） | 反思 2 |
+| P2 | 高 | 单位哨兵测试：同一轨迹 MDA self-fit vs gmx rms（防 10× 单位回归） | 反思 1 |
+| P3 | 中 | binder-cautious 对称（rerun --stage binder 不再无脑重跑 RF） | 反思 4 |
+| P4 | 中 | 跨靶点铰链标定：刚性参照蛋白新 e2e（apo MD） | 反思 3 |
+| — | — | 每轮互联网检索 + 文档 + git 提交 | 循环要求 |
+
+### 验证
+- [x] 快速套件全绿：212（+7：fidelity、sentinel、binder cautious、
+      纯蛋白 target_prep、apo select/build）
+- [x] P0a/P0b（本轮新增）：纯蛋白靶点 e2e 两处崩溃修复（见下）
+- [x] P1：scaffold_rmsd_a 字段 + 真实设计 15.08 Å 发现 + RF 官方文档佐证
+- [x] P2：单位哨兵测试（比预期复杂：三处 PBC/参考伪影先于单位问题）
+- [x] P3：binder_rf_cautious（默认 False 保行为）
+- [x] P4：ubq 刚性参照 e2e（2 ns×3，apo 通路）+ 标定表
+- [x] 文档 + git 提交
+
+### 结果
+1. **P0a 纯蛋白 target_prep 崩溃（校准的直接拦路虎）**：靶点无配体时
+   `lig_pdb` 未初始化 → `UnboundLocalError`（rigid_ubq/rigid_gfl 两次
+   e2e 均死在此）。修复：`lig_pdb = None` 初始化 + 测试（纯蛋白 PDB
+   走完全程，ligand_* 为 None，pocket 走表面回退）。
+2. **P0b MD 无系统可选**：`select_system` 只认 ligand/screening/binder/
+   vhh 四类复合物，纯蛋白靶点 → "no MD system candidates"。修复：无
+   配体时追加 `apo` 选项（"apo 靶点，蛋白单独 MD — 柔性/铰链基线"），
+   `build_complex_pdb` 加 apo 分支（仅靶点去水、保留原生链号）。两个
+   e2e 测试。apo 通路即本轮 P4 的运行通道。
+3. **P1 scaffold 保真度守卫**：`scaffold_fidelity()`（设计链 vs scaffold
+   CA 的 Kabsch RMSD，Å，scale-invariant 不乘 10）+ `scaffold_rmsd_a`
+   字段挂进每个设计。**真实 r10_e2e 发现**：设计链对 1EWN scaffold
+   骨架漂移 **15.08 Å**（noise_scale_ca=0 并未刚性钉住 scaffold），但
+   局部结构保留（40-mer 滑窗最小 5.9 Å、长度 200=200 精确匹配、SS
+   70% 链状一致）。**身份发现**：`vhh1ewn.pdb` 实为 1EWN = 人 AAG
+   DNA 修复糖基化酶核心（非 VHH，目录名误导）。**检索佐证**：RF
+   scaffold-guided 官方文档明确其用"SS 模式 + 块邻接"粗粒度条件、
+   "允许序列与精细结构变化"（sequence and fine structural variation）
+   → 15 Å 漂移是**预期行为而非 bug**；scaffold 序列作为打分先验仍合理
+   （近似），fidelity 字段现在把这个近似程度显式化。
+4. **P2 单位哨兵（比"单位"复杂）**：对 r10_e2e rep1 轨迹逐层剥伪影——
+   (a) `rmsd_r1.xvg` 的 gmx 参考是**过期 md.tpr**（与 xtc frame 0 相差
+   ~21-23 Å，全 8847 原子）→ 核心 RMSD 2.083 与 per-chain 漂移系列
+   系统性偏高（**R17 独立修复项**）；(b) 紧凑盒子（蛋白几乎充满盒子）
+   下 wrapped 坐标在边界 flapping，gmx wrapped 视图 0→1.36 nm 而 MDA
+   逐原子 unwrap 仅 0.13 nm；(c) `trjconv -ur compact` 自身成像选择
+   会把 frame 0 平移整盒子向量（flat 2.54 nm 伪影）。哨兵最终形态：
+   trjconv compact 展开 + **其自身 frame 0 作参考** + gmx rms vs MDA
+   CA self-fit，三副本基线比 0.13-0.40（CA vs 全 backbone + 展开策略
+   之差，非单位），断言带 [0.05, 1.0]——10× 单位错误（双向）都出带。
+5. **P3 binder_rf_cautious**：`rfdesign(rf_cautious=True)` 在顶层
+   design_*.pdb ≥ n_designs 时跳过 RF 复用现有设计（默认 False = 永远
+   重采样，行为不变）；`run_design` 从 options 读 `binder_rf_cautious`。
+   测试：cautious 不触发 RF、非 cautious 必触发、设计不足时仍触发。
+6. **P4 跨靶点标定（刚性参照 = 泛素 1UBQ，apo，2 ns×3，~18 min）**：
+   | 指标 | 刚性 ubq（2 ns×3） | 柔性 HIV-PR（5 ns×3, r10_e2e） |
+   |------|-------------------|-------------------------------|
+   | 整体 self-fit 末端 (nm) | 0.110-0.208（中位 0.154） | 0.289-2.083（中位 0.317，2.083 为过期 TPR 副本） |
+   | 域 vs-rest 末端 (nm) | 0.076-0.183（中位 0.107） | 0.075-0.160（中位 0.115） |
+   | final_norm（每域聚合） | 0.040-0.080（中位 0.056） | 0.041-0.109（中位 0.056） |
+   **结论**：① 域级 vs-rest/final_norm 在刚性与柔性靶点间**几乎完全
+   重叠** → 域级 norm 不足以单独分类"铰链 vs 刚性"，刚性蛋白基线
+   ~0.04-0.08 必须先扣；② **整体 self-fit 末端能干净分开**（ubq 上限
+   0.21 nm < HIV-PR 下限 0.29 nm，无重叠）→ 建议把它纳入铰链/柔性
+   判据（当前 interpret 仅用域级）；③ 绝对 4 Å 铰链阈值远高于刚性
+   基线（vs-rest 上限 1.83 Å）→ 对刚性蛋白无误报，阈值保守合理。
+   GFP（1GFL）尝试作第二刚性参照失败：色原体 CRO 残基（SER 65 缺 O）
+   使 pdb2gmx 报错 → 修饰残基处理是 R17 缺口。
+7. **e2e 汇总**：212/212 快测绿；新项目 rigid_ubq（apo 通路首跑成功）、
+   rigid_gfl（ pdb2gmx 修饰残基失败，留档）。r10_e2e 状态未动（R15 值）。
+
+### 反思 / 下轮缺口（R17）
+1. **过期 TPR 参考（本轮最大未修 bug）**：gmx 链级 RMSD 系列
+   （`rmsd_rN.xvg` + per-chain drift）以 md.tpr 为参考，而 tpr 是
+   2 ns 段产物、xtc 是延长段轨迹（起点已漂移 ~21 Å）→ rep1 "final
+   2.083 nm" 应读作 ~0.3。修复候选：分析前 `trjconv -b 0 -dt 大值`
+   抽 xtc frame 0 作参考，或延长前重新 grompp。影响：所有项目的
+   链级漂移系列与"最终 RMSD 0.896"均值。
+2. **铰链判据升级**：把整体 self-fit 末端（本轮证明可分刚性/柔性）
+   并入 interpret 注 8/9，形成"整体 + 域级"两级判据；刚性基线
+   （ubq 0.04-0.08 norm / ≤0.21 nm self-fit）写进注释。
+3. **第二刚性参照 + 修饰残基**：修 pdb2gmx 对 CRO 类修饰残基的
+   处理（或选无修饰残基的刚性蛋白如 crambin 1CPS 去交叉残基），
+   补第二刚性点 + 一个已知铰链体系（无辅因子的腺苷酸激酶），
+   把标定从"1 刚性 + 1 柔性"扩成可发表级小矩阵。
+4. **scaffold 内容**：1EWN 是 AAG 酶核心非 VHH——要么换真 VHH
+   scaffold（如 1HYW 类），要么把目录/注释改名（vhh_scaffolds/
+   aag_core_1ewn）并文档化"fold 条件而非序列条件"。
+5. **展开策略一致性**：gmx rep2 展开视图 0.984 nm vs MDA 0.130 nm
+   差异提示 compact-com 与逐原子 unwrap 在紧凑盒子下不等价；域分析
+   链路（MDA 逐原子）正确，但 gmx 链级 xvg 仍用 wrapped——过期 TPR
+   修复时顺带评估是否统一 unwrap。

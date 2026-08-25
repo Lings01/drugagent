@@ -182,3 +182,58 @@ def test_binder_score_designs_cache(tmp_path, monkeypatch):
     calls.clear()
     bd.score_designs([d0], tmp_path / "target.pdb", wd, {})
     assert len(calls) == 2, "mtime-changed design must be re-validated"
+
+
+def test_rfdesign_cautious_reuses_existing(tmp_path, monkeypatch):
+    """R16/P3: rf_cautious=True skips the RF run when enough top-level
+    design PDBs already exist (symmetry with vhh_rf_cautious: a plain
+    rerun should not silently burn another ~20 min of RF for a project
+    whose designs are already validated/cached). Default (False) keeps
+    the always-resample behavior."""
+    from drugagent.modules import binder as bd
+    # minimal target PDB (chain A, 3 CAs)
+    lines = []
+    for i in range(3):
+        lines.append(
+            f"ATOM  {i+1:>5d}  CA  GLY A {i+1:<5d} "
+            f"{float(i*3.8):8.3f}{0.0:8.3f}{0.0:8.3f}{1.0:6.2f}{0.0:6.2f}")
+    tgt = tmp_path / "target.pdb"
+    tgt.write_text("\n".join(lines) + "\nEND\n")
+    outdir = tmp_path / "rf_designs"
+    outdir.mkdir()
+    # two pre-existing designs
+    for i in range(2):
+        (outdir / f"design_{i}.pdb").write_text("\n".join(lines) + "END\n")
+    calls = []
+    monkeypatch.setattr(bd, "rf_repo", lambda: tmp_path)
+    monkeypatch.setattr(bd, "rf_python", lambda: "/bin/true")
+    monkeypatch.setattr(bd, "run_cmd",
+                        lambda cmd, **kw: calls.append(cmd) or 0)
+
+    def fake_run_cmd(cmd, **kw):
+        calls.append(cmd)
+        return 0
+    monkeypatch.setattr(bd, "run_cmd", fake_run_cmd)
+
+    # cautious: reuse, no RF call
+    calls.clear()
+    des = bd.rfdesign(tgt, {"center": [0, 0, 0], "xsize": 10, "ysize": 10,
+                            "zsize": 10}, tmp_path, n_designs=2,
+                      rf_cautious=True)
+    assert calls == [], "cautious must not re-run RF"
+    assert len(des) == 2
+
+    # default: always re-samples (RF called)
+    calls.clear()
+    des = bd.rfdesign(tgt, {"center": [0, 0, 0], "xsize": 10, "ysize": 10,
+                            "zsize": 10}, tmp_path, n_designs=2)
+    assert len(calls) == 1, "non-cautious must run RF"
+    assert len(des) == 2
+
+    # cautious with too few existing designs still runs RF
+    (outdir / "design_1.pdb").unlink()
+    calls.clear()
+    des = bd.rfdesign(tgt, {"center": [0, 0, 0], "xsize": 10, "ysize": 10,
+                            "zsize": 10}, tmp_path, n_designs=2,
+                      rf_cautious=True)
+    assert len(calls) == 1
