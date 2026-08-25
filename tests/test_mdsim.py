@@ -1458,3 +1458,34 @@ def test_domain_vs_rest_rmsd_hinge():
     assert vsrest["dom1"][0] < 1e-6
     assert vsrest["dom1"][-1] > 1.0  # ~34 deg on a ~7 A-wide block
     assert vsrest["dom1"][-1] > vsrest["dom1"][3] - 1e-9
+
+
+def test_domain_diameter_and_normalized_vs_rest():
+    """R14: domain entries carry a frame-0 CA diameter, and the vs-rest
+    summary exposes a size-normalized value (vs-rest / diameter) so the
+    4 A hinge threshold becomes comparable across domain sizes."""
+    import numpy as np
+    from drugagent.modules.mdsim import (domain_vs_rest_rmsd_series,
+                                         find_ss_domains,
+                                         domain_diameters)
+    n_dom, n_rest = 8, 22
+    F = 3
+    frames = []
+    for t in (0.0, 0.3, 0.6):
+        dom = _rigid_block(n_dom, 0.0, t=t, rot_axis=(0.0, 0.0, 1.0))
+        rest = _rigid_block(n_rest, 12.0, t=0.0)
+        fr = np.full((n_dom + n_rest, 4, 3), np.nan)
+        fr[:n_dom, 1] = dom
+        fr[n_dom:, 1] = rest
+        frames.append(fr)
+    coords = np.stack(frames)
+    domains = [{"name": "dom1", "res_start": 1, "res_end": n_dom,
+                "n_res": n_dom}]
+    diam = domain_diameters(coords, domains)
+    assert set(diam) == {"dom1"}
+    # 8 CA atoms at 1.0 (nm-coordinate) spacing -> diameter ~7.0
+    assert 6.9 < diam["dom1"] < 7.1
+    vs = domain_vs_rest_rmsd_series(coords, domains)
+    assert vs["dom1"][-1] > 1.0  # hinge motion present
+    norm = vs["dom1"][-1] / diam["dom1"]
+    assert 0.1 < norm < 1.0  # sub-diameter domain swing

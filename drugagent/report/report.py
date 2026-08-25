@@ -264,6 +264,14 @@ def _sec_vhh(state: dict, static: bool) -> str:
             best = min(fs) if fs else None
             fr = f"{c['n_fragments']} 片段" + (
                 f", 最佳 {best:.2g}" if best is not None else "")
+        # R14: pose-level target distance for de_novo designs
+        md = c.get("min_dist_a")
+        if md is None:
+            dist = "-"
+        elif md < 8.0:
+            dist = f"{md:.1f} ✓"
+        else:
+            dist = f"{md:.1f} ⚠未接触"
         rows.append([
             i + 1, c["source"],
             f"{c.get('plddt', float('nan')):.1f}" if c.get("plddt") else "-",
@@ -272,6 +280,7 @@ def _sec_vhh(state: dict, static: bool) -> str:
             fr,
             f"{c.get('interface_plddt_mean', float('nan')):.1f}"
             if c.get("interface_plddt_mean") else "-",
+            dist,
             f"{c.get('composite_score', float('nan')):.3f}",
         ])
     llm = v.get("llm_pick")
@@ -290,14 +299,20 @@ def _sec_vhh(state: dict, static: bool) -> str:
         d = resolve_defaults(state.get("options") or {})
         thr = float(d.vhh_plddt_min)
         fig = go.Figure()
+        import numpy as _np
+        arr = _np.asarray(vals, dtype=float)
+        p50 = float(_np.percentile(arr, 50))
+        p90 = float(_np.percentile(arr, 90))
+        n_pass = int((arr > thr).sum())
         fig.add_trace(go.Histogram(x=vals, nbinsx=20,
                                    marker_color="#4C78A8", name="pLDDT"))
         fig.add_vline(x=thr, line_dash="dash", line_color="#E45756",
                       annotation_text=f"门槛 {thr:g}")
-        fig.update_layout(title=(f"VHH 文库 pLDDT 分布 (n={len(vals)}, "
-                                 f"fast/full 门槛 {thr:g})"),
-                          height=300, template="plotly_white",
-                          xaxis_title="pLDDT", yaxis_title="条数")
+        fig.update_layout(
+            title=(f"VHH 文库 pLDDT 分布 (n={len(vals)}, 门槛 {thr:g}; "
+                   f"p50={p50:.1f}, p90={p90:.1f}, 过门槛 {n_pass} 条)"),
+            height=300, template="plotly_white",
+            xaxis_title="pLDDT", yaxis_title="条数")
         hist = _plot_png_b64(fig) if static else _plot_div(fig)
     return f"""
 <h2>4. 纳米抗体 (VHH) 筛选 + 设计 <span class="badge">Module D</span></h2>
@@ -307,7 +322,7 @@ Track B (de novo 设计): {b.get('n_designs')} 个 (VHH scaffold 约束)
 </div>
 {hist}
 {llm_note}
-{_table(['#', '来源', 'pLDDT', '对接打分', 'CDR片段', '界面pLDDT', '综合分'], rows)}
+{_table(['#', '来源', 'pLDDT', '对接打分', 'CDR片段', '界面pLDDT', '目标距离 (Å)', '综合分'], rows)}
 {viewer}
 """
 
@@ -432,9 +447,11 @@ def _sec_md(state: dict, static: bool) -> str:
             f"{st['final'] * 10:.1f}" if st.get("final") is not None else "-",
             f"{st['mean'] * 10:.1f}" if st.get("mean") is not None else "-",
             f"{vs['final'] * 10:.1f}" if vs.get("final") is not None else "-",
+            f"{vs['final_norm']:.2f}" if vs.get("final_norm") is not None else "-",
         ])
     dom_html = (_table(["结构域", "残基", "残基数", "末端自拟合 (Å)",
-                        "均值自拟合 (Å)", "末端相对其余 (Å)"], dom_rows)
+                        "均值自拟合 (Å)", "末端相对其余 (Å)",
+                        "归一化 (÷直径)"], dom_rows)
                 if dom_rows else "")
     return f"""
 <h2>5. MD 模拟 <span class="badge">Module E</span></h2>

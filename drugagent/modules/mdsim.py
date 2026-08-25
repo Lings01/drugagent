@@ -2605,6 +2605,24 @@ def domain_rmsd_series(coords: np.ndarray,
     return out
 
 
+def domain_diameters(coords: np.ndarray,
+                     domains: list[dict]) -> dict[str, float]:
+    """R14: frame-0 CA diameter (nm, max pairwise distance) of each
+    domain — the normalization scale for vs-rest RMSD, so a 4 Å shift
+    means different things for a 1 nm vs a 2 nm domain."""
+    ca = coords[0, :, 1, :]
+    out: dict[str, float] = {}
+    for d in domains:
+        s, e = d["res_start"] - 1, d["res_end"]
+        pts = ca[s:e]
+        pts = pts[np.isfinite(pts[:, 0])]
+        if len(pts) < 2:
+            continue
+        dd = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=2)
+        out[d["name"]] = float(dd.max())
+    return out
+
+
 def analyze_ss(tpr: Path, xtc: Path) -> dict:
     """Per-frame DSSP-like secondary structure for one replica trajectory.
     Returns empty arrays when no protein backbone is present (e.g. a
@@ -2625,6 +2643,11 @@ def analyze_ss(tpr: Path, xtc: Path) -> dict:
     # RMSD — reuses the already-loaded trajectory (no second MDAnalysis
     # pass)
     domains = find_ss_domains(codes[0])
+    if domains:
+        _diam = domain_diameters(coords, domains)
+        for _d in domains:
+            if _d["name"] in _diam:
+                _d["diameter_nm"] = round(_diam[_d["name"]], 4)
     domain_rmsd = domain_rmsd_series(coords, domains) if domains else {}
     domain_rmsd_vs_rest = (domain_vs_rest_rmsd_series(coords, domains)
                            if domains else {})
@@ -3077,6 +3100,14 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
             (r["domains"] for r in per_rep if r.get("domains")), [])
         summary["domain_rmsd"] = domain_summary
         if vs_rest_summary:
+            # R14: size-normalized vs-rest (diameter from frame 0) so the
+            # hinge threshold is comparable across domain sizes
+            for _name, _st in vs_rest_summary.items():
+                _diam = next((d.get("diameter_nm") for d in summary["domains"]
+                              if d.get("name") == _name), None)
+                if _diam:
+                    _st["final_norm"] = round(_st["final"] / _diam, 3)
+                    _st["mean_norm"] = round(_st["mean"] / _diam, 3)
             summary["domain_rmsd_vs_rest"] = vs_rest_summary
     # per-chain RMSD (mean across replicas + mean final value)
     for key in sorted({k for r in per_rep for k in r

@@ -35,6 +35,19 @@ def _ckpt_path(name: str) -> Path:
     return WEIGHTS / "torch_cache" / "hub" / "checkpoints" / name
 
 
+def esmfold_version_tag() -> str:
+    """R14: stable tag identifying the loaded ESMFold weights (ckpt name +
+    size) — validation caches (vhh/binder scored.json) are keyed on it so
+    a weights update invalidates previously cached pLDDTs."""
+    try:
+        p = _ckpt_path("esmfold_3B_v1.pt")
+        if p.is_file():
+            return f"esmfold_3B_v1:{p.stat().st_size}"
+    except Exception:  # noqa: BLE001
+        pass
+    return "esmfold:unknown"
+
+
 def get_model(device: str = "cpu"):
     """Load ESMFold; uses local weights when present, else downloads."""
     global _model, _model_device

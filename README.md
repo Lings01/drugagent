@@ -96,7 +96,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 │   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
 ├── DESIGN.md                         # 2.0 架构设计
 ├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (197 快测 + 15 slow e2e)
+├── tests/                            # pytest 套件 (202 快测 + 15 slow e2e)
 └── logs/                             # 构建/运行日志
 ```
 
@@ -114,7 +114,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 ## 测试
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (197 用例)
+env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (202 用例)
 env/bin/python -m pytest tests/ -q                   # 含 slow（需 vina/GROMACS/RF 权重）
 env/bin/python -m pytest tests/test_mdsim.py -m slow -q \    --basetemp=$PWD/data/fixtures/_ptmp             # MD e2e 建议本地盘 basetemp
 ```
@@ -283,8 +283,15 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   **R13**：track B 设计验证（ESMFold 复杂打分）落 `vhh_designs/scored.json`
   按设计 mtime 缓存（G8 下沉到设计粒度，rerun 只重验证被 RF 覆盖的设计）；
   只验证顶层设计 `vhh_design_N.pdb`（旧 glob 会连带 `_binder`/`_complex`
-  副产物，12 文件当 6 设计）；VHH 节新增**文库 pLDDT 分布直方图**
-  （track_a.plddt_all + 门槛虚线）。
+  副产物，12 文件当 6 设计）；VHH 节**文库 pLDDT 分布直方图**
+  （track_a.plddt_all + 门槛虚线 + p50/p90 + 过门槛条数）。**R14**：
+  设计条目加**几何接口度量**（`design_interface_geom`：设计链-靶点
+  min CA 距离 / <6 Å 接触对 / contact 标志）——RF 不写残基名（设计
+  全 GLY），序列级 interface pLDDT 对位姿盲（两不同位姿设计打出
+  完全相同的 pLDDT），几何接触是位姿级判别；候选表 "目标距离 (Å)"
+  列（⚠未接触 标记）；scored.json 缓存键含 ESMFold 权重标签
+  （`esmfold_version_tag`，权重更新自动失效）；`binder.score_designs`
+  同款缓存（03_binder/scored.json）。
 - **VHH pLDDT 门槛（R11/G9）**：ESMFold 对 VHH 的 pLDDT 因 CDR3 loop 无序而
   集中在 30-35（100 条实测 p50=31.5、p90=34.5、>45 仅 1 条），旧 45/70 门槛
   让 fast 模式只剩 1 个对接样本。现 fast 35 / full 50（`vhh_plddt_min` 可覆盖），
@@ -314,9 +321,11 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   指标 + RMSF + 聚类 + **R13/R1-v2 域-其余蛋白相对 RMSD**（每帧把其余
   蛋白 fit 到 frame 0、用同一变换测该域 → 铰链/变构刚体运动信号，
   自拟合序列按构造消不掉它；报告域表"末端相对其余 (Å)"列 + 点线曲线，
-  解读注 9 分两档：内部稳定 <3 Å → 铰链特征，否则 → 构象重排为主）
-  汇总成中文"柔性解读"，写入 md summary 与报告第 5 节。`gmx_analyze`
-  新增 `kind=chain` / `kind=ss`。
+  解读注 9 分两档：内部稳定 <3 Å → 铰链特征，否则 → 构象重排为主；
+  **R14 附域直径归一**：frame 0 CA 直径 `diameter_nm` 进域条目，
+  vs-rest 附 `final_norm`/`mean_norm`，报告域表 "归一化 (÷直径)"
+  列——绝对阈值跨域尺寸不可比）汇总成中文"柔性解读"，写入 md
+  summary 与报告第 5 节。`gmx_analyze` 新增 `kind=chain` / `kind=ss`。
   注意：MD 直接从 EM 起步，前 ~100-200 ps 属松弛段（Rg/链间 RMSD 会先跳变），
   解读时建议忽略早期段。
 - **刚性漏斗局限**：默认对接/设计基于单一刚性构象，柔性只在 MD 阶段采样；

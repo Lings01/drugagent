@@ -582,3 +582,66 @@ def _design_pdb_text():
             f"{float(i):8.3f}{float(i):8.3f}{float(i):8.3f}"
             f"{1.00:6.2f}{0.00:6.2f}")
     return "\n".join(lines) + "\nEND\n"
+
+
+def test_design_interface_geometry(tmp_path, monkeypatch):
+    """R14: the designed VHH's geometric interface to the target is
+    measured (min distance + contact count) — the sequence-based
+    interface pLDDT cannot see a VHH floating 34 A away from the target."""
+    from drugagent.modules import vhh as vh
+    def _ca_line(serial, chain, res, x, y, z):
+        return (f"ATOM  {serial:>5d}  CA  GLY {chain}{res:>4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{0.00:6.2f}")
+    lines_t = [_ca_line(i + 1, "A", i + 1, float(i), float(i), float(i))
+               for i in range(5)]
+    # VHH docked right next to the target (2 A CA gap along z)
+    lines_v = [_ca_line(i + 1, "B", i + 1, float(i), float(i),
+                        2.0 + float(i)) for i in range(5)]
+    pdb = tmp_path / "vhh_design_0.pdb"
+    pdb.write_text("\n".join(lines_t + lines_v) + "\nEND\n")
+    g = vh.design_interface_geom(pdb)
+    assert g["min_dist_a"] < 3.0          # 2 A separation of CA rows
+    assert g["n_contacts"] >= 5           # every VHH CA within 6 A
+    assert g["contact"] is True
+    # same VHH but far away (z offset 36 A)
+    far = tmp_path / "vhh_design_1.pdb"
+    far.write_text("\n".join(lines_t + [
+        _ca_line(i + 1, "B", i + 1, float(i), float(i),
+                 36.0 + float(i)) for i in range(5)]) + "\nEND\n")
+    g2 = vh.design_interface_geom(far)
+    assert g2["min_dist_a"] > 28.0
+    assert g2["n_contacts"] == 0
+    assert g2["contact"] is False
+
+
+def test_score_designs_esmfold_version_invalidation(tmp_path, monkeypatch):
+    """R14: the scored.json cache key includes the ESMFold weight tag —
+    a weights change invalidates previously cached validations."""
+    from drugagent.modules import vhh as vh
+    from drugagent.modules import binder as binder_mod
+    from drugagent.modules import esmfold_run as esm
+    d = tmp_path / "vhh_designs"
+    d.mkdir()
+    p0 = _design_pdb(d, "vhh_design_0.pdb")
+    (tmp_path / "clean.pdb").write_text("ATOM      1  CA GLY A  1\nEND\n")
+    calls = []
+
+    def fake_predict(seqs, **kw):
+        calls.append(1)
+        return {"mean_plddt": 70.0, "plddt": [80.0] * 10, "pdb": "X"}
+
+    monkeypatch.setattr(binder_mod, "_chain_ids", lambda p: ["A"])
+    monkeypatch.setattr(binder_mod, "_ca_sequence", lambda p, c: "GGLGG")
+    monkeypatch.setattr(binder_mod, "_make_complex",
+                        lambda a, b, o: open(o, "w").write("MODEL") or o)
+    monkeypatch.setattr(esm, "predict", fake_predict)
+    monkeypatch.setattr(esm, "interface_metrics",
+                        lambda comp, p: {"interface_plddt_mean": 50.0,
+                                         "interface_plddt_min": 40.0,
+                                         "n_interface_residues": 3})
+    tags = iter(["esmfold_3B_v1:111", "esmfold_3B_v1:222"])
+    monkeypatch.setattr(esm, "esmfold_version_tag", lambda: next(tags))
+    vh.score_designs([p0], d, tmp_path / "clean.pdb")
+    calls.clear()
+    vh.score_designs([p0], d, tmp_path / "clean.pdb")
+    assert len(calls) == 1, "version change must invalidate the cache"

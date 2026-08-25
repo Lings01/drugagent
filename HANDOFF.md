@@ -1,12 +1,12 @@
-# DrugAgent 2.0 — 交接说明（第 13 轮结束）
+# DrugAgent 2.0 — 交接说明（第 14 轮结束）
 
 ## 一句话状态
-代码库处于"第 13 轮迭代完成"状态：**track B 设计验证缓存**（scored.json
-+ 顶层设计 glob 修复，rerun vhh 从 ~3 h 降到 7.5 min）、**R1-v2 域-其余
-蛋白相对 RMSD**（铰链/变构检测 + 解读注 9 + 报告列/曲线）、**pLDDT 分布
-直方图**（G9 门槛可视化）。快速测试 197/197 绿。r10_e2e 全状态最新：
-vhh_30 综合分 1.0 居首（frag1 -8.66 kcal/mol）、MD 域表含相对其余列 +
-注 9（dom3 构象重排 14.1 Å）。
+代码库处于"第 14 轮迭代完成"状态：**track B 设计几何接口度量**
+（根因：全 GLY 序列级 pLDDT 位点盲 → min CA 距离/接触对/目标距离列）、
+**binder.score_designs 同款缓存**、**ESMFold 权重版本进缓存键**、
+**vs-rest 域直径归一**（final_norm + 报告列）、直方图 p50/p90+过门槛。
+快速测试 202/202 绿。r10_e2e：两设计均在结合面（3.4 Å、30 接触对）、
+域归一化 0.041-0.109（dom1 相对摆动最大）。
 
 ## 关键路径
 - 项目根：`/home/data/lrs/drug/drugagent`（唯一可写持久盘；**/tmp 是 tmpfs
@@ -17,6 +17,26 @@ vhh_30 综合分 1.0 居首（frag1 -8.66 kcal/mol）、MD 域表含相对其余
   （产物幂等复用：重跑同一 `--name` 会跳过已完成阶段产物）
 - 轮次记录：`ROUNDLOG.md`（每轮计划/结果/反思，下轮计划从"反思/下轮缺口"开始）
 - git 仓库已初始化（.gitignore 覆盖 env/data/projects/日志）
+
+## 第 14 轮已完成（见 ROUNDLOG 详情）
+1. **P2 track B pLDDT 相同根因 + 几何接口**：两设计几何实质不同
+   （目标相对帧位姿差 2.2 nm，min CA 距离 3.4 Å、接触对 30/31），
+   相同 pLDDT 的根因 = RF 设计链全 GLY → ESMFold 只收序列 → 位点盲。
+   新增 `vhh.design_interface_geom()`（min_dist_a / n_contacts /
+   contact<8 Å）进设计条目 + ranked 候选（min_dist_a/contact）+
+   报告候选表 "目标距离 (Å)" 列（⚠未接触 标记）。注意 PDB 坐标
+   是 Å（勿 ×10——本轮手测脚本就踩过）。
+2. **P1 binder 缓存**：`binder.score_designs` 同款 scored.json
+   （03_binder/scored.json），签名 = [设计 mtime, 靶点 mtime,
+   alt 序列, esmfold_version_tag]。
+3. **P3 版本 + 直方图**：`esmfold_run.esmfold_version_tag()`
+   （ckpt 名+大小）进 vhh/binder 缓存签名（权重更新 → 缓存整体
+   失效，实测生效）；直方图标题 p50/p90 + 过门槛条数（plotly JSON
+   把 `/` 转义 \u002f，标题避开斜杠）。
+4. **P4 vs-rest 归一**：`mdsim.domain_diameters()`（frame 0 CA 直径）
+   → 域条目 `diameter_nm`；summary vs-rest 附 `final_norm`/
+   `mean_norm`（÷直径）；报告域表 "归一化 (÷直径)" 列。实测
+   r10_e2e：直径 11.4-24.4 nm，final_norm 0.041-0.109。
 
 ## 第 13 轮已完成（见 ROUNDLOG 详情）
 1. **track B 设计验证缓存**：`vhh.score_designs()`（抽出）+

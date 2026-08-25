@@ -132,3 +132,53 @@ def test_ca_sequence_full_names(tmp_path):
     pdb.write_text("".join(lines) + "END\n")
     # ALA ASP GLU LYS ARG GLN TRP TYR ASN GLY -> A D E K R Q W Y N G
     assert _ca_sequence(pdb) == "ADEKRQWYNG"
+
+
+def test_binder_score_designs_cache(tmp_path, monkeypatch):
+    """R14: binder design validation is cached (scored.json) keyed by
+    design+target mtime + alt sequence — re-runs skip ESMFold, changed
+    inputs re-score."""
+    from drugagent.modules import esmfold_run as esm
+    wd = tmp_path / "03_binder"
+    wd.mkdir()
+
+    def _pdb(residue_chain="A", n=3):
+        lines = []
+        for i in range(1, n + 1):
+            lines.append(
+                f"ATOM  {i:>5d}  CA  GLY {residue_chain}{i:>4d}    "
+                f"{float(i):8.3f}{float(i):8.3f}{float(i):8.3f}"
+                f"{1.00:6.2f}{0.00:6.2f}")
+        return "\n".join(lines) + "\nEND\n"
+
+    (tmp_path / "target.pdb").write_text(_pdb("A", 4))
+    d0 = wd / "binder_design_0.pdb"
+    d0.write_text(_pdb("B", 3))
+    calls = []
+
+    def fake_predict(seq, **kw):
+        calls.append(seq)
+        return {"mean_plddt": 60.0, "plddt": [70.0] * 10,
+                "min_plddt": 40.0, "pdb": "X"}
+
+    monkeypatch.setattr(esm, "predict", fake_predict)
+    monkeypatch.setattr(esm, "interface_metrics",
+                        lambda comp, p: {"interface_plddt_mean": 50.0,
+                                         "interface_plddt_min": 30.0,
+                                         "n_interface_residues": 4})
+    out1 = bd.score_designs([d0], tmp_path / "target.pdb", wd, {})
+    assert out1[0]["interface_plddt_mean"] == 50.0
+    assert len(calls) == 2  # mono + complex
+
+    calls.clear()
+    out2 = bd.score_designs([d0], tmp_path / "target.pdb", wd, {})
+    assert not calls, "cached design was re-validated"
+    assert out2[0]["interface_plddt_mean"] == 50.0
+    assert out2[0]["mono_plddt"] == 60.0
+
+    import os
+    st = d0.stat()
+    os.utime(d0, (st.st_atime, st.st_mtime + 5.0))
+    calls.clear()
+    bd.score_designs([d0], tmp_path / "target.pdb", wd, {})
+    assert len(calls) == 2, "mtime-changed design must be re-validated"

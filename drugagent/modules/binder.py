@@ -14,7 +14,7 @@ from loguru import logger
 
 from ..config import TOOLS
 from ..llm import AgentBrain
-from ..utils import jsave, pmap, run_cmd
+from ..utils import jload, jsave, pmap, run_cmd
 
 
 def rf_repo() -> Path:
@@ -200,13 +200,33 @@ def _fallback_sequence(pdb: Path) -> str:
 # --------------------------------------------------------------------------- #
 def score_designs(design_pdbs: list[Path], target_pdb: Path, workdir: Path,
                   seqs: dict[str, list[str]], *, device: str = "cpu") -> list[dict]:
-    """ESMFold monomer pLDDT + target-binder complex interface pLDDT."""
-    from .esmfold_run import interface_metrics, predict
+    """ESMFold monomer pLDDT + target-binder complex interface pLDDT.
 
+    R14: persistent per-design cache (``scored.json`` in workdir), same
+    pattern as vhh.score_designs — a design whose (design mtime, target
+    mtime, alt sequence, ESMFold weight tag) signature matches the cached
+    entry is reused without paying the two ESMFold predictions again."""
+    from .esmfold_run import esmfold_version_tag, interface_metrics, predict
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    cache_path = workdir / "scored.json"
+    cache = jload(cache_path) if cache_path.is_file() else {}
+    target_mt = target_pdb.stat().st_mtime if target_pdb.is_file() else 0.0
+    tag = esmfold_version_tag()
     scored = []
     for pdb in design_pdbs:
         name = pdb.stem
         d = {"design": str(pdb), "seqs": seqs.get(name, [])}
+        alt = (seqs.get(name) or [None])[0]
+        sig = [pdb.stat().st_mtime if pdb.is_file() else 0.0, target_mt,
+               alt, tag]
+        cached = cache.get(name)
+        if cached and cached.get("sig") == sig:
+            d.update({k: v for k, v in cached.items() if k != "sig"})
+            logger.info(f"binder design {name}: reusing cached validation "
+                        f"(interface pLDDT {cached.get('interface_plddt_mean')})")
+            scored.append(d)
+            continue
         # monomer — RF design PDBs carry GLY residue names; when a real
         # sequence (RF log / ProteinMPNN) is available, score that instead
         dch = _design_chain(pdb)
@@ -215,7 +235,6 @@ def score_designs(design_pdbs: list[Path], target_pdb: Path, workdir: Path,
             mono_pdb = workdir / f"{name}_binder_only.pdb"
             _extract_chain(pdb, dch, mono_pdb)
         seq = _ca_sequence(mono_pdb)
-        alt = (seqs.get(name) or [None])[0]
         if alt and set(seq) <= {"G"} and len(alt) == len(seq):
             seq = alt
             d["seq_used"] = "mpnn_or_rf_log"
@@ -244,6 +263,12 @@ def score_designs(design_pdbs: list[Path], target_pdb: Path, workdir: Path,
             d["interface_plddt_mean"] = im.get("interface_plddt_mean")
             d["interface_plddt_min"] = im.get("interface_plddt_min")
             d["n_interface"] = im.get("n_interface_residues")
+            # cache only full successes (errors are retried next run)
+            if d["interface_plddt_mean"] is not None:
+                cache[name] = {"sig": sig,
+                               **{k: v for k, v in d.items()
+                                  if k not in ("design", "seqs")}}
+                jsave(cache_path, cache)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"complex predict failed for {name}: {e}")
             d["complex_plddt"] = float("nan")

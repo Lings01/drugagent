@@ -284,3 +284,68 @@ def test_md_domain_vs_rest_column(tmp_path):
     txt = open(out["html"]).read()
     assert "末端相对其余 (Å)" in txt, "vs-rest column missing"
     assert "5.0" in txt  # 0.5 nm -> 5.0 A
+
+
+def test_vhh_histogram_stats_and_target_distance(tmp_path):
+    """R14: histogram title carries p50/p90 + gate-pass count; ranked
+    table shows the pose-level target distance for de_novo designs."""
+    state = {
+        "project_dir": str(tmp_path),
+        "options": {"fast": True, "llm_model": "test"},
+        "vhh": {
+            "track_a": {"track": "A_screening", "n_library": 80,
+                        "n_modeled": 80, "n_docked": 5,
+                        "plddt_all": [30 + i * 0.5 for i in range(40)],
+                        "results": []},
+            "track_b": {"track": "B_de_novo", "n_designs": 2,
+                        "designs": []},
+            "ranked": [
+                {"source": "screening", "plddt": 46.0, "docking_score": -8.6,
+                 "n_fragments": 2, "fragment_scores": [10.0, -8.6],
+                 "min_dist_a": None, "contact": None,
+                 "interface_plddt_mean": None, "composite_score": 1.0},
+                {"source": "de_novo", "plddt": 42.0, "docking_score": None,
+                 "min_dist_a": 34.4, "contact": False,
+                 "interface_plddt_mean": 46.4, "composite_score": 0.3},
+            ],
+        },
+    }
+    out = rp.build_report(state)
+    txt = open(out["html"]).read()
+    assert "p50=" in txt and "p90=" in txt, "histogram percentile stats"
+    # 30.0..49.5 in 0.5 steps; fast gate 35 -> values 35.5..49.5 pass = 29
+    assert "过门槛 29 条" in txt, "gate pass count (35 gate, 30-49.5 range)"
+    assert "目标距离 (Å)" in txt, "target-distance column"
+    assert "34.4" in txt and "未接触" in txt, "non-contact design flagged"
+
+
+def test_md_domain_table_normalized_column(tmp_path):
+    """R14: domain table shows the diameter-normalized vs-rest value."""
+    state = {
+        "project_dir": str(tmp_path),
+        "options": {"modules": ["md"], "fast": True, "llm_model": "test"},
+        "md": {
+            "system": {"label": "靶点"},
+            "gromacs": {"version": "2023.1", "ff": "amber99sb-ildn"},
+            "ns": 5.0, "reps": 1,
+            "summary": {
+                "rmsd": {"mean": [0.1, 0.2], "std": [0.0, 0.0]},
+                "rg": {"mean": [12.0, 11.9], "std": [0.0, 0.0]},
+                "final_rmsd_mean": 0.2, "final_rg_mean": 11.9,
+                "domains": [{"name": "dom1", "res_start": 1, "res_end": 10,
+                             "n_res": 10, "diameter_nm": 2.0}],
+                "domain_rmsd": {"dom1": {"final": 0.05, "mean": 0.04,
+                                         "series": [0.03, 0.05]}},
+                "domain_rmsd_vs_rest": {"dom1": {"final": 0.5,
+                                                 "mean": 0.3,
+                                                 "final_norm": 0.25,
+                                                 "mean_norm": 0.15,
+                                                 "series": [0.1, 0.5]}},
+            },
+            "replicas": [{"rep": 1, "clusters": {0: 1.0}}],
+        },
+    }
+    out = rp.build_report(state)
+    txt = open(out["html"]).read()
+    assert "归一化 (÷直径)" in txt, "normalized column header"
+    assert "0.25" in txt, "normalized value rendered"

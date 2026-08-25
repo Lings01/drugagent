@@ -371,3 +371,79 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
    scaffold-guided 的噪声尺度问题或验证复用了同一复杂——下轮抽查
    两个设计的序列/构象是否实质不同（若 RF 每次生成近似设计，n_designs
    >1 的价值存疑）。
+
+---
+
+# 第 14 轮
+
+## 计划
+| # | 优先级 | 任务 | 依据（第 13 轮反思） |
+|---|--------|------|----------------------|
+| P1 | 高 | binder.score_designs 同款缓存（scored.json） | 反思 1：binder 设计验证同构无缓存 |
+| P2 | 高 | track B 两设计 interface pLDDT 相同根因核查 + 几何接口度量 | 反思 5：46.4 完全相同，RF 设计是否实质不同 |
+| P3 | 中 | scored.json 缓存键加 ESMFold 权重版本；直方图 p50/p90 + 过门槛计数 | 反思 3/4 |
+| P4 | 中 | vs-rest 域尺寸归一（diameter，报告列） | 反思 2：4 Å 阈值跨域尺寸不可比 |
+
+### 验证
+- [x] 快速套件全绿：202（+5：binder 缓存、几何接口、版本失效、
+      直径归一、报告统计）
+- [x] P2 根因：两设计 PDB 逐原子对比（几何不同：目标相对帧位姿差
+      2.2 nm；**均在接触**：min CA 距离 3.4/3.44 Å、<6 Å CA 对 30/31）
+- [x] `rerun --stage md` → 域直径 11.4-24.4 nm + final_norm
+      （0.041-0.109，dom1 相对摆动最大）进 state/report ✓
+- [x] `rerun --stage vhh` → min_dist_a/contact/n_contacts 进
+      track_b + ranked，报告 "目标距离 (Å)" 列（✓/⚠未接触 标记）✓；
+      版本标签使旧缓存整体失效重验证（2×6 min，符合设计）
+- [x] 文档 + git 提交
+
+### 结果
+1. **P2 根因（track B 两设计 interface pLDDT 完全相同 = 46.428…）**：
+   逐原子对比确认**两个设计几何实质不同**（目标相对帧 VHH 位姿差
+   2.2 nm，min CA 距离 3.4 Å、接触 CA 对 30/31——设计是好的、在
+   结合面上）。根因在验证：RF 不写残基名（设计链全 GLY），
+   `score_designs` 用 `_ca_sequence` 取序列后 ESMFold **只收序列**
+   → 两设计输入序列完全相同（target + 200×GLY）→ pLDDT 位点盲。
+   附带发现：`_complex.pdb` 落盘的是 ESMFold 输出（两文件 md5 相同
+   因此），输入差异被覆盖。修复：新增 `design_interface_geom()`
+   （设计链 vs 目标链 min CA 距离 / <6 Å 接触对 / contact<8 Å 标志）
+   进每个设计条目 + ranked 候选 + 报告 "目标距离 (Å)" 列
+   （⚠未接触 标记）。**插曲**：中途误判"VHH 漂离靶点 34 Å"——实为
+   手测脚本把 Å 当 nm ×10（与 `design_interface_geom` 首版同型
+   bug，已修+测试锁定）。
+2. **P1 binder 缓存**：`binder.score_designs` 同款 `scored.json`
+   缓存，签名 = [设计 mtime, 靶点 mtime, alt 序列, ESMFold 权重
+   标签]；只缓存完整成功。与 vhh 版共享 `esmfold_version_tag()`。
+3. **P3 缓存版本 + 直方图**：`esmfold_run.esmfold_version_tag()`
+   （ckpt 名+大小）进 vhh/binder 缓存签名——权重更新自动整体失效
+   （实测 R13 缓存无 `__version__` → R14 重验证 2 设计）。直方图
+   标题加 p50/p90 + 过门槛条数（注意 plotly JSON 把 `/` 转义成
+   \u002f，标题里避开斜杠）。
+4. **P4 vs-rest 归一**：`domain_diameters()`（frame 0 CA 最大
+   成对距离）进域条目 `diameter_nm`；summary vs-rest 加
+   `final_norm`/`mean_norm`（÷直径）；报告域表 "归一化 (÷直径)"
+   列。**实测 r10_e2e**：直径 11.4-24.4 nm，final_norm 0.041-0.109
+   ——dom1（11.4 nm 小域）12.4 Å 位移 = 相对摆动最大（0.109），
+   dom2（20.3 nm）8.4 Å 只有 0.041。绝对 4 Å 阈值与归一值并存，
+   解读注暂用绝对值（归一阈值待标定，见反思 2）。
+5. **e2e 汇总**：202/202 快速测试绿；r10_e2e 报告含目标距离列
+   （两设计 3.4/3.4 Å ✓ 接触）、归一化列、直方图 p50/p90。
+
+### 反思 / 下轮缺口
+1. **R14-v2 设计验证升级**：当前 interface pLDDT 是序列级（全 GLY
+   位点盲），几何接触是位姿级但只测"接没接触"。下一步：RF 输出
+   里恢复真实序列（scaffold-guided 的 1EWN 序列是已知的——scaffold
+   库 `data/tools/vhh_scaffolds/vhh1ewn.pdb`；把 scaffold 序列作为
+   seqs 传入 ESMFold，pLDDT 才是真序列打分），或 ESMFold 带结构
+   输入（pseudo-contacts）验证位姿。
+2. **归一化阈值标定**：final_norm 0.04-0.11 在 5 ns apo 单靶点上
+   没有"正常/异常"参照。下轮跑 1-2 个已知刚性的复合物靶点
+   （如带配体的 HIV-PR、或 GFP 单体）建立基线分布，再定铰链判据
+   （如 norm>0.2 且绝对>4 Å → 强铰链信号）。
+3. **binder 缓存 e2e 未走真实路径**：单元测试覆盖，但 03_binder
+   的 scored.json 要等下次 `rerun --stage binder` 才生成（binder
+   阶段有 G8 幂等，正常流程不重跑设计验证——缓存主要惠及
+   force-rerun 场景，符合预期）。
+4. **RF 谨慎模式（cautious）**：`vhh_design_N.pdb` 已存在则跳过
+   设计——`rerun --stage vhh` 永远复用首跑设计（n_designs 的
+   多样性只在首跑生效）。若要每次 rerun 重新采样，需
+   `--force-designs`（先挪走旧 PDB）；下轮可加 options.vhh_rf_cautious。

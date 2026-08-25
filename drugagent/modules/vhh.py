@@ -414,6 +414,41 @@ def screen_vhh(state: dict, workdir: Path, *, n: int, n_jobs: int) -> dict:
 # --------------------------------------------------------------------------- #
 # track B: de novo design on VHH scaffold
 # --------------------------------------------------------------------------- #
+def design_interface_geom(pdb: Path) -> dict:
+    """R14: geometric interface between the designed chain and the target
+    chain in an RF output PDB.
+
+    RF writes no residue names (the design is all-GLY), so the
+    sequence-based interface pLDDT cannot see a VHH that floats away
+    from the target — the geometric contact is the pose-level
+    discriminator. Returns min_dist_a (CA-CA in Å, PDB units), n_contacts
+    (CA pairs < 6 Å) and contact (min < 8 Å). None fields when <2 CA
+    chains."""
+    from ..modules.binder import _chain_ids, _design_chain
+    import numpy as np
+    coords: dict[str, list] = {}
+    for line in Path(pdb).read_text().splitlines():
+        if line.startswith("ATOM") and line[12:16].strip() == "CA":
+            coords.setdefault(line[21], []).append(
+                [float(line[30:38]), float(line[38:46]),
+                 float(line[46:54])])
+    chains = list(coords)
+    if len(chains) < 2:
+        return {"min_dist_a": None, "n_contacts": None, "contact": None}
+    dch = _design_chain(Path(pdb))
+    if dch not in coords:
+        return {"min_dist_a": None, "n_contacts": None, "contact": None}
+    tch = [c for c in chains if c != dch][0]
+    v = np.array(coords[dch])
+    tg = np.array(coords[tch])
+    dists = np.linalg.norm(v[:, None, :] - tg[None, :, :], axis=2)
+    # PDB coordinates are Angstrom (no nm->A conversion here)
+    min_d = float(dists.min())
+    return {"min_dist_a": round(min_d, 1),
+            "n_contacts": int((dists < 6.0).sum()),
+            "contact": bool(min_d < 8.0)}
+
+
 def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
                   predict_fn=None, im_fn=None) -> list[dict]:
     """R13: ESMFold-complex scoring of RF designs with a persistent
@@ -427,15 +462,23 @@ def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
     ``predict_fn``/``im_fn`` are injectable for tests."""
     from ..modules.binder import (_ca_sequence, _chain_ids, _design_chain,
                                   _extract_chain, _make_complex)
-    from ..modules.esmfold_run import interface_metrics, predict
+    from ..modules.esmfold_run import (esmfold_version_tag, interface_metrics,
+                                       predict)
     predict_fn = predict_fn or predict
     im_fn = im_fn or interface_metrics
     cache_path = outdir / "scored.json"
     cache = jload(cache_path) if cache_path.is_file() else {}
+    # R14: the cache is only valid for the same ESMFold weights
+    tag = esmfold_version_tag()
+    if cache.get("__version__") != tag:
+        cache = {"__version__": tag}
     scored: list[dict] = []
     for pdb in designs:
         name = pdb.stem
         entry = {"design": str(pdb)}
+        # R14: pose-level interface geometry (sequence pLDDT alone cannot
+        # detect a VHH floating away from the target — all-GLY scoring)
+        entry.update(design_interface_geom(pdb))
         cached = cache.get(name)
         if cached and cached.get("mtime") == pdb.stat().st_mtime:
             entry.update({k: v for k, v in cached.items() if k != "mtime"})
@@ -573,8 +616,13 @@ def design_vhh_all(state: dict) -> dict:
             "idx": r.get("idx"),
             "n_fragments": r.get("n_fragments"),
             "fragment_scores": r.get("fragment_scores"),
+            "min_dist_a": None,
+            "contact": None,
         })
     for r in track_b.get("designs", []):
+        # R14: carry the pose-level interface geometry (all-GLY scoring
+        # makes the sequence-based pLDDT blind to a VHH floating away
+        # from the target — min distance is the pose discriminator)
         candidates.append({
             "source": "de_novo",
             "plddt": r.get("complex_plddt"),
@@ -582,6 +630,8 @@ def design_vhh_all(state: dict) -> dict:
             "interface_plddt_mean": r.get("interface_plddt_mean"),
             "design": r.get("design"),
             "sequence": r.get("sequence"),
+            "min_dist_a": r.get("min_dist_a"),
+            "contact": r.get("contact"),
         })
     # normalize each metric to 0-1 and average
     def _norm(vals):
