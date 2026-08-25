@@ -122,9 +122,9 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 ├── DESIGN.md                         # 2.0 架构设计
 ├── HANDOFF.md                        # 环境与坑、当前状态、验证命令
 ├── ROUNDLOG.md                       # 迭代日志（每轮 计划/结果/反思）
-├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (218 快测 + 15 slow e2e)
-└── logs/                             # 构建/运行日志
+├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/) [本地]
+├── tests/                            # pytest 套件 (218 快测 + 15 slow e2e) [本地, 未入仓库]
+└── logs/                             # 构建/运行日志 [本地]
 ```
 
 ## 运行状态与断点
@@ -140,6 +140,9 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
   与 `report.pdf`。
 
 ## 测试
+
+> `tests/` 目录（本地开发用，未随仓库发布；`env/`、`data/`、`projects/`
+> 同属本地部署，重建方式见 [TUTORIAL.md](TUTORIAL.md) §1 与 HANDOFF.md）。
 
 ```bash
 env/bin/python -m pytest tests/ -m "not slow" -q --basetemp=$PWD/data/fixtures/_ptmp   # 快速单测 (218 用例)

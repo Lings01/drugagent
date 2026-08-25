@@ -21,3 +21,7 @@ mdout.mdp
 /step*.pdb
 # setup idempotency markers
 /.setup_done/
+
+# 本地测试与中间产物（不入仓库）
+tests/
+temp.top*
