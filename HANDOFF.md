@@ -1,12 +1,13 @@
-# DrugAgent 2.0 — 交接说明（第 14 轮结束）
+# DrugAgent 2.0 — 交接说明（第 15 轮结束）
 
 ## 一句话状态
-代码库处于"第 14 轮迭代完成"状态：**track B 设计几何接口度量**
-（根因：全 GLY 序列级 pLDDT 位点盲 → min CA 距离/接触对/目标距离列）、
-**binder.score_designs 同款缓存**、**ESMFold 权重版本进缓存键**、
-**vs-rest 域直径归一**（final_norm + 报告列）、直方图 p50/p90+过门槛。
-快速测试 202/202 绿。r10_e2e：两设计均在结合面（3.4 Å、30 接触对）、
-域归一化 0.041-0.109（dom1 相对摆动最大）。
+代码库处于"第 15 轮迭代完成"状态：**P0 轨迹单位修复**（MDA Å→nm，
+R12-R14 域 RMSD 全部 ×10 且 SS 假"全域"，域值回归真值 + 单位回归
+测试）、**track B 复杂打分改用 scaffold 真实序列**（1EWN 200 残基，
+`seq_used="scaffold"`）、**vhh_rf_cautious 选项**（false 归档重采样）、
+铰链标定（apo vs 带配体 HIV-PR：final_norm 区间重叠，绝对阈值
+维持）、binder 缓存 e2e 验证。快速测试 205/205 绿。r10_e2e：5 域
+真值（self-fit 0.5-0.6 Å、vs-rest 0.8-1.4 Å、norm 0.041-0.109）。
 
 ## 关键路径
 - 项目根：`/home/data/lrs/drug/drugagent`（唯一可写持久盘；**/tmp 是 tmpfs
@@ -17,6 +18,26 @@
   （产物幂等复用：重跑同一 `--name` 会跳过已完成阶段产物）
 - 轮次记录：`ROUNDLOG.md`（每轮计划/结果/反思，下轮计划从"反思/下轮缺口"开始）
 - git 仓库已初始化（.gitignore 覆盖 env/data/projects/日志）
+
+## 第 15 轮已完成（见 ROUNDLOG 详情）
+1. **P0 单位 bug（最重要）**：`mdsim._ss_backbone_trajectory` 返回
+   MDA 原始 Å，下游按 nm → 域 RMSD ×10、`HBOND_DIST=4.5` 按 nm
+   比较（ss_frac 0.99、域=整链）。修：出口 ÷10；`HBOND_DIST=0.45 nm`；
+   合成 SS 夹具 ×0.1；回归测试 `test_ss_trajectory_units_are_nm`
+   （真实轨迹：CA 相邻 0.25-0.50 nm、尺度 <8 nm）。**注意**：gmx 系
+   指标（xvg）一直是 nm 正确，只有 MDA 域链路受影响。
+2. **P1 scaffold 序列**：`vhh.design_vhh` 读 scaffold PDB 序列 →
+   `score_designs(seqs=…)`；全 GLY 且等长时替换 seqB（`seq_used=
+   "scaffold"`），缓存签名含 alt。假设：设计 200 残基=scaffold 200
+   残基（长度匹配，未读 RF log 确认全序列保留）。
+3. **P2 vhh_rf_cautious**：选项默认 true（旧行为）；false 时顶层
+   vhh_design_*.pdb → `archive_<ts>/` 再跑 RF。
+4. **P3 标定**：带配体参照（agent_smoke，2 ns×2）vs apo（5 ns×3）：
+   final_norm 0.068-0.098 vs 0.041-0.109 重叠 → norm 不足以区分
+   状态；绝对阈值 4 Å 在真值下无误报。跨靶点标定留 R16+。
+5. **P4 binder 缓存 e2e**：`rerun --stage binder` 生成 03_binder/
+   scored.json（签名含 MPNN 真实序列 + 权重标签）；新设计
+   iface 52.5/39.6（真序列 → 分数分化，对照全 GLY 时代）。
 
 ## 第 14 轮已完成（见 ROUNDLOG 详情）
 1. **P2 track B pLDDT 相同根因 + 几何接口**：两设计几何实质不同

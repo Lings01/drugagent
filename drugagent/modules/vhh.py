@@ -450,6 +450,7 @@ def design_interface_geom(pdb: Path) -> dict:
 
 
 def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
+                  seqs: dict[str, list[str]] | None = None,
                   predict_fn=None, im_fn=None) -> list[dict]:
     """R13: ESMFold-complex scoring of RF designs with a persistent
     per-design cache (``scored.json``).
@@ -464,6 +465,7 @@ def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
                                   _extract_chain, _make_complex)
     from ..modules.esmfold_run import (esmfold_version_tag, interface_metrics,
                                        predict)
+    seqs = seqs or {}
     predict_fn = predict_fn or predict
     im_fn = im_fn or interface_metrics
     cache_path = outdir / "scored.json"
@@ -479,8 +481,10 @@ def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
         # R14: pose-level interface geometry (sequence pLDDT alone cannot
         # detect a VHH floating away from the target — all-GLY scoring)
         entry.update(design_interface_geom(pdb))
+        # R15: real (scaffold) sequence for the all-GLY designed chain
+        alt = (seqs.get(name) or [None])[0]
         cached = cache.get(name)
-        if cached and cached.get("mtime") == pdb.stat().st_mtime:
+        if cached and cached.get("mtime") == pdb.stat().st_mtime                 and cached.get("alt") == alt:
             entry.update({k: v for k, v in cached.items() if k != "mtime"})
             logger.info(f"design {name}: reusing cached validation "
                         f"(interface pLDDT "
@@ -496,8 +500,15 @@ def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
                 _extract_chain(pdb, _design_chain(pdb), binder_pdb)
             comp_pdb = outdir / f"{name}_complex.pdb"
             _make_complex(clean_pdb, binder_pdb, comp_pdb)
-            out = predict_fn([_ca_sequence(comp_pdb, "A"),
-                              _ca_sequence(comp_pdb, "B")],
+            seqB = _ca_sequence(comp_pdb, "B")
+            # R15/R14-v2: the RF design chain is all-GLY (RF writes no
+            # residue names) — swap in the real scaffold sequence when
+            # available and length-matched, or the complex pLDDT scores
+            # "target + 200xGLY" and is blind to the actual sequence
+            if alt and set(seqB) <= {"G"} and len(alt) == len(seqB):
+                seqB = alt
+                entry["seq_used"] = "scaffold"
+            out = predict_fn([_ca_sequence(comp_pdb, "A"), seqB],
                              num_recycles=3, device="cpu")
             comp_pdb.write_text(out["pdb"])
             rp = out.get("res_present")
@@ -513,6 +524,7 @@ def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
             entry["sequence"] = _ca_sequence(comp_pdb, "B")
             # cache only successes (errors are retried next run)
             cache[name] = {"mtime": pdb.stat().st_mtime,
+                           "alt": alt,
                            "complex_plddt": out["mean_plddt"],
                            "interface_plddt_mean":
                            im.get("interface_plddt_mean"),
@@ -526,6 +538,23 @@ def score_designs(designs: list[Path], outdir: Path, clean_pdb: Path,
             entry["error"] = str(e)[:200]
         scored.append(entry)
     return scored
+
+
+def _scaffold_sequence(scaffold_dir: Path) -> str | None:
+    """R15: 1-letter sequence of the first scaffold PDB (chain A) in the
+    scaffold dir — the designed chain preserves it (scaffold-guided mode)
+    while the RF output writes it as all-GLY."""
+    try:
+        ids_file = scaffold_dir / "scaffold_ids.txt"
+        ids = [l.strip() for l in ids_file.read_text().splitlines()
+               if l.strip()]
+        pdb = scaffold_dir / f"{ids[0]}.pdb" if ids else None
+        if pdb is None or not pdb.is_file():
+            return None
+        from ..modules.binder import _ca_sequence
+        return _ca_sequence(pdb, "A")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def design_vhh(state: dict, workdir: Path, *, n_designs: int) -> dict:
@@ -550,6 +579,22 @@ def design_vhh(state: dict, workdir: Path, *, n_designs: int) -> dict:
     target.write_text(txt + "END\n")
 
     hotspots = pocket_hotspots(Path(prep["clean_pdb"]), pocket)
+    # R15: RF's cautious mode skips existing vhh_design_N.pdb, so reruns
+    # silently reuse the first run's designs. vhh_rf_cautious=false
+    # archives the old top-level designs first so RF re-samples.
+    cautious = bool((state.get("options") or {}).get("vhh_rf_cautious",
+                                                     True))
+    if not cautious:
+        top = [p for p in outdir.glob("vhh_design_*.pdb")
+               if p.stem.split("_")[-1].isdigit()]
+        if top:
+            import time as _time
+            arch = outdir / f"archive_{_time.strftime('%Y%m%d_%H%M%S')}"
+            arch.mkdir(exist_ok=True)
+            for p in top:
+                p.rename(arch / p.name)
+            logger.info(f"vhh_rf_cautious=false: archived {len(top)} "
+                        f"existing designs -> {arch.name}")
     cmd = [
         rf_python(), str(repo / "scripts" / "run_inference.py"),
         "scaffoldguided.scaffoldguided=True",
@@ -584,8 +629,14 @@ def design_vhh(state: dict, workdir: Path, *, n_designs: int) -> dict:
                      if p.stem.split("_")[-1].isdigit())
     logger.info(f"VHH track B: {len(designs)} designs")
 
+    # R15/R14-v2: the designed chain is all-GLY (RF writes no residue
+    # names); in scaffold-guided mode the design preserves the scaffold
+    # sequence, so score the complex with the real scaffold sequence
+    # (length-matched swap inside score_designs)
+    scaffold_seqs = _scaffold_sequence(scaffold_dir)
+    seqs = {p.stem: [scaffold_seqs] for p in designs} if scaffold_seqs else {}
     # score each design with ESMFold complex (R13: cached in scored.json)
-    scored = score_designs(designs, outdir, Path(prep["clean_pdb"]))
+    scored = score_designs(designs, outdir, Path(prep["clean_pdb"]), seqs)
     scored.sort(key=lambda x: (x.get("interface_plddt_mean") or 0), reverse=True)
     return {"track": "B_de_novo", "n_designs": len(designs), "designs": scored[:10]}
 

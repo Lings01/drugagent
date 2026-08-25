@@ -2299,7 +2299,10 @@ SS_NAMES = {SS_COIL: "-", SS_H: "H", SS_G: "G", SS_I: "I", SS_E: "E", SS_B: "B"}
 # DSSP uses O..HN < 2.3 A with an explicit H; without H we use O..N with a
 # relaxed distance and a relaxed angle (measured on the 1HVI crystal: 4.5/100
 # gives 69% structured, matching the known ~70% beta-sandwich content).
-HBOND_DIST = 4.5   # O(i)..N(j) A
+# R15/P0: _ss_backbone_trajectory returns nm, so the H-bond distance
+# threshold is nm (4.5 A); R12-R14 ran it on Angstrom coordinates and
+# 4.5 "nm" matched every residue pair (ss_frac ~ 0.99)
+HBOND_DIST = 0.45   # O(i)..N(j) nm (4.5 A)
 HBOND_ANGLE = 100.0  # deg, C(i)-O(i)..N(j)
 
 
@@ -2400,7 +2403,9 @@ def _ss_classify_frame(coords: dict[str, np.ndarray]) -> np.ndarray:
 
 def _ss_backbone_trajectory(tpr: Path, xtc: Path) -> np.ndarray:
     """Load backbone coords for all frames -> (n_frames, n_res, 4, 3) with
-    roles ordered [N, CA, C, O] (NaN where absent). Requires MDAnalysis."""
+    roles ordered [N, CA, C, O] (NaN where absent), in nm. Requires
+    MDAnalysis (which returns Angstrom — converted here; R15/P0: the
+    R12-R14 code assumed nm and every domain RMSD came out 10x large)."""
     import MDAnalysis as MDA
     u = MDA.Universe(str(tpr), str(xtc))
     bb = u.select_atoms("name N or name CA or name C or name O")
@@ -2478,7 +2483,9 @@ def _ss_backbone_trajectory(tpr: Path, xtc: Path) -> np.ndarray:
         flat = np.full(n_res * 4 * 3, np.nan)
         flat[flat_idx3] = unwrapped
         frames.append(flat.reshape(n_res, 4, 3))
-    return np.stack(frames)
+    # R15/P0: MDAnalysis positions are Angstrom; the whole downstream
+    # domain machinery (thresholds in nm, report x10 -> A) assumes nm
+    return np.stack(frames) / 10.0
 
 
 def find_ss_domains(codes: np.ndarray, min_res: int = 8) -> list[dict]:

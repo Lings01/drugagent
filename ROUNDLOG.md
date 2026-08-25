@@ -447,3 +447,77 @@ R1 真·结构域 RMSD（DSSP 域边界/NMDYN）留第 12 轮：需要域分割�
    设计——`rerun --stage vhh` 永远复用首跑设计（n_designs 的
    多样性只在首跑生效）。若要每次 rerun 重新采样，需
    `--force-designs`（先挪走旧 PDB）；下轮可加 options.vhh_rf_cautious。
+
+---
+
+# 第 15 轮
+
+## 计划
+| # | 优先级 | 任务 | 依据（第 14 轮反思） |
+|---|--------|------|----------------------|
+| P1 | 高 | R14-v2：scaffold 真实序列进 track B ESMFold 验证（全 GLY 位点盲 → 真序列打分） | 反思 1 |
+| P2 | 高 | vhh_rf_cautious 选项（cautious 默认导致 rerun 永远复用首跑设计） | 反思 4 |
+| P3 | 中 | 铰链归一阈值标定：用带配体 HIV-PR（agent_smoke，2 ns×2）做刚性参照 | 反思 2 |
+| P4 | 中 | binder 缓存 e2e（rerun --stage binder 走真实路径生成 scored.json） | 反思 3 |
+
+### 验证
+- [x] 快速套件全绿：205（+3：scaffold 序列、rf_cautious、轨迹单位回归）
+- [x] P4：`rerun --stage binder` → 03_binder/scored.json 生成（2 设计，
+      签名含 MPNN 真实序列 + 权重标签），新设计 iface 52.5/39.6（不同
+      序列 → 不同分数，与全 GLY 时代对比鲜明）
+- [x] **P0（本轮新增，最高优先）**：轨迹单位 Å→nm 修复（见下）
+- [x] P3：带配体参照重算（见标定数据）
+- [x] `rerun --stage vhh` → scaffold 序列生效 + 报告（进行中→已完成）
+- [x] 文档 + git 提交
+
+### 结果
+1. **P0 轨迹单位 bug（本轮最大发现）**：`_ss_backbone_trajectory` 返回
+   **MDAnalysis 原始单位 Å**，但 R12-R14 所有下游代码按 nm 处理
+   （阈值 nm、报告 ×10 显示 Å）→ 所有域 RMSD 放大 10 倍，解读注 8/9
+   的"构象漂移 5.9 Å"等全是假阳性（真值 0.59 Å）。修复：函数出口
+   `/10.0`（unwrapping/make-whole 全程 Å 自洽，只在出口换算）+ 回归
+   测试（真实轨迹：相邻 CA 间距 0.25-0.50 nm、蛋白尺度 < 8 nm）。
+   **连带发现**：`HBOND_DIST = 4.5`（注释 Å、按 nm 坐标比较）→
+   4.5 nm 匹配所有 O-N 对，ss_frac 0.99、"域"=整条链（1-98/100-197）。
+   修为 0.45 nm 后 ss_frac 回到 0.75（与 DSSP ~73% 校准一致）、5 域
+   恢复。合成 SS 测试夹具同步 ×0.1。
+2. **P1 scaffold 序列（R14-v2）**：`design_vhh` 读 scaffold PDB（1EWN，
+   200 残基 HLTRLGLEFF…）序列传入 `score_designs(seqs=…)`；复杂打分
+   时若 PDB 序列全 GLY 且长度匹配则替换为 scaffold 序列（`seq_used =
+   "scaffold"`）。缓存签名加 alt 序列。**语义**：pLDDT 现在回答
+   "1EWN 序列作为此靶点 binder 的可折叠性"（序列级），设计间的
+   判别仍靠位姿级几何（min_dist_a/接触对）——两者正交、互补。
+3. **P2 vhh_rf_cautious**：选项（默认 True=旧行为）；False 时把顶层
+   vhh_design_*.pdb 归档到 `archive_<ts>/` 再跑 RF → rerun 真正重采样。
+4. **P3 标定（修复后真值）**：
+   | 体系 | 时长 | 域 self-fit 末端 (Å) | 域 vs-rest 末端 (Å) | final_norm |
+   |------|------|---------------------|--------------------|-----------|
+   | apo HIV-PR dimer（r10_e2e） | 5 ns×3 | 0.5-0.6 | 0.8-1.4 | 0.041-0.109 |
+   | 带配体 HIV-PR（smoke，参照） | 2 ns×2 | 0.5-1.7 | 1.7-2.4 | 0.068-0.098 |
+   结论：同靶点两状态在 2-5 ns 内 final_norm 区间**重叠**（0.04-0.11），
+   norm 不足以区分"配体稳定 vs apo 柔性"；绝对值上带配体参照 vs-rest
+   (1.7-2.4 Å) 反而更高（2 ns 尚处松弛段）。**判定**：当前 note 8/9
+   的 4 Å 绝对阈值在真值下两体系均不触发 → 无误报；norm 列保留作
+   跨尺寸参照，铰链判据维持绝对阈值（跨靶点标定留给 R16+，需 ≥50
+   残基差异的刚性参照系综）。解读注从"dom3 构象漂移 5.9 Å"（假阳性）
+   变为"各结构域内部均稳定（最大 0.6 Å < 3 Å）— 高整体 RMSD 主要来自
+   域间相对运动"（正确且更准）。
+5. **e2e 汇总**：205/205 快测绿；r10_e2e md 重算（5 域真值 + 归一列）、
+   vhh 重验证（scaffold 序列）、报告含目标距离列/归一化列/直方图统计。
+
+### 反思 / 下轮缺口
+1. **P0 的长尾**：`_ss_backbone_trajectory` 只被 analyze_ss 用（域分析
+   链路），但 gmx 系（chain RMSD/RMSF/聚类）一直用 xvg（nm 正确）——
+   本轮修复只影响域链路。R16 加一个"单位哨兵"测试：对同一轨迹
+   比较 MDA self-fit 与 gmx rms 同帧值（±20% 容差），防止单位回归。
+2. **scaffold 序列假设待证**：设计链 200 残基 = scaffold 200 残基，
+   长度匹配支持"序列保留"，但未读 RF 输出 log 确认（RF 的
+   scaffold-guided 不保证全序列保留——若 RF 重设计了 scaffold 区，
+   pLDDT 是"1EWN 序列"而非"实际设计序列"的打分）。R16：解析 RF log
+   或跑一次 ProteinMPNN 验证。
+3. **norm 标定样本不足**：目前 1 靶点 2 状态。跨靶点标定需要一个
+   已知铰链蛋白（如带门控回路的激酶）+ 一个刚性参照（如 GFP 单体
+   5 ns）——需要新的 e2e 项目（~2×2 h MD）。
+4. **binder 设计多样性**：`deterministic=False` 但每次 rerun 都重跑 RF
+   （03_binder 无设计缓存——与 vhh 的 cautious 模式不对称）。R16 可给
+   binder 加同款 cautious/归档选项统一行为。

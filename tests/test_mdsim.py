@@ -123,8 +123,15 @@ def _ideal_helix(n):
     return {"N": N, "CA": CA, "C": C, "O": O}
 
 
+def _to_nm(coords: dict) -> dict:
+    """R15/P0: synthetic fixtures are built in Angstrom; _ss_classify_frame
+    operates on the nm trajectory (MDA Angstrom converted in
+    _ss_backbone_trajectory)."""
+    return {k: v / 10.0 for k, v in coords.items()}
+
+
 def test_ss_classify_helix():
-    coords = _ideal_helix(20)
+    coords = _to_nm(_ideal_helix(20))
     codes = md._ss_classify_frame(coords)
     # interior residues should be helix; terminals may be coil
     helix = int(np.sum(codes[4:16] == md.SS_H))
@@ -140,7 +147,7 @@ def test_ss_classify_coil():
     coords = {}
     for key in ("N", "CA", "C", "O"):
         coords[key] = rng.uniform(-30, 30, size=(n, 3))
-    codes = md._ss_classify_frame(coords)
+    codes = md._ss_classify_frame(_to_nm(coords))
     # a random cloud of backbone atoms has few genuine H-bonds
     assert int(np.sum(codes == 0)) >= int(0.5 * n)
 
@@ -165,7 +172,8 @@ def test_ss_classify_strand():
             N[i] = [CA[i, 0] + 1.2, 0.0, 2.9]
             C[i] = [CA[i, 0] - 1.2, 0.0, 2.9]
             O[i] = [CA[i, 0] - 1.5, 0.0, 1.45]
-    codes = md._ss_classify_frame({"N": N, "CA": CA, "C": C, "O": O})
+    codes = md._ss_classify_frame(
+        _to_nm({"N": N, "CA": CA, "C": C, "O": O}))
     structured = int(np.sum(codes > 0))
     assert structured >= 8, f"only {structured} structured: {codes}"
     # strand/bridge codes, not helix (a coarse synthetic turn may yield a
@@ -1489,3 +1497,25 @@ def test_domain_diameter_and_normalized_vs_rest():
     assert vs["dom1"][-1] > 1.0  # hinge motion present
     norm = vs["dom1"][-1] / diam["dom1"]
     assert 0.1 < norm < 1.0  # sub-diameter domain swing
+
+
+def test_ss_trajectory_units_are_nm(hivp_pdb, tmp_path):
+    """R15/P0: _ss_backbone_trajectory must return nm. MDAnalysis hands
+    out Angstrom; the R12-R14 code assumed nm, so every domain RMSD was
+    10x too large (and the 4 A interpretation notes were false
+    positives). Guard with a real trajectory: consecutive CA distances
+    must be ~3.8 A = 0.38 nm, and the protein must fit its box."""
+    import numpy as np
+    from drugagent.modules.mdsim import _ss_backbone_trajectory
+    base = Path("projects/r10_e2e/05_md/md_rep1")
+    if not (base / "md.xtc").is_file():
+        pytest.skip("r10_e2e trajectory not present")
+    coords = _ss_backbone_trajectory(base / "md.tpr", base / "md.xtc")
+    ca = coords[0, :, 1, :]
+    d = np.linalg.norm(np.diff(ca, axis=0), axis=1)
+    # consecutive CAs in a protein: ~0.3-0.45 nm (3-4.5 A)
+    assert 0.25 < d.mean() < 0.50, f"mean CA step {d.mean():.3f} (unit bug?)"
+    # protein extent must be plausible in nm (HIV-PR dimer ~5 nm wide,
+    # box 5.9 nm) — 53 would mean Angstrom leaked through
+    extent = ca.max(axis=0) - ca.min(axis=0)
+    assert extent.max() < 8.0, f"extent {extent.max():.1f} nm too large"

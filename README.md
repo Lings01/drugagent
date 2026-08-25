@@ -96,7 +96,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 │   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
 ├── DESIGN.md                         # 2.0 架构设计
 ├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/)
-├── tests/                            # pytest 套件 (202 快测 + 15 slow e2e)
+├── tests/                            # pytest 套件 (205 快测 + 15 slow e2e)
 └── logs/                             # 构建/运行日志
 ```
 
@@ -114,7 +114,7 @@ MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 
 ## 测试
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (202 用例)
+env/bin/python -m pytest tests/ -m "not slow" -q     # 快速单测 (205 用例)
 env/bin/python -m pytest tests/ -q                   # 含 slow（需 vina/GROMACS/RF 权重）
 env/bin/python -m pytest tests/test_mdsim.py -m slow -q \    --basetemp=$PWD/data/fixtures/_ptmp             # MD e2e 建议本地盘 basetemp
 ```
@@ -291,7 +291,12 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   完全相同的 pLDDT），几何接触是位姿级判别；候选表 "目标距离 (Å)"
   列（⚠未接触 标记）；scored.json 缓存键含 ESMFold 权重标签
   （`esmfold_version_tag`，权重更新自动失效）；`binder.score_designs`
-  同款缓存（03_binder/scored.json）。
+  同款缓存（03_binder/scored.json）。**R15**：复杂打分改用 **scaffold
+  真实序列**（RF 设计链全 GLY，scaffold-guided 保留 scaffold 序列；
+  全 GLY 且长度匹配时替换，`seq_used="scaffold"`——pLDDT 从
+  "200×GLY 可折叠性"变为"1EWN 序列作为此靶点 binder 的可折叠性"）；
+  选项 `vhh_rf_cautious`（默认 true）：false 时归档既有设计 PDB 再跑
+  RF，rerun 真正重采样。
 - **VHH pLDDT 门槛（R11/G9）**：ESMFold 对 VHH 的 pLDDT 因 CDR3 loop 无序而
   集中在 30-35（100 条实测 p50=31.5、p90=34.5、>45 仅 1 条），旧 45/70 门槛
   让 fast 模式只剩 1 个对接样本。现 fast 35 / full 50（`vhh_plddt_min` 可覆盖），
@@ -324,8 +329,13 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。
   解读注 9 分两档：内部稳定 <3 Å → 铰链特征，否则 → 构象重排为主；
   **R14 附域直径归一**：frame 0 CA 直径 `diameter_nm` 进域条目，
   vs-rest 附 `final_norm`/`mean_norm`，报告域表 "归一化 (÷直径)"
-  列——绝对阈值跨域尺寸不可比）汇总成中文"柔性解读"，写入 md
-  summary 与报告第 5 节。`gmx_analyze` 新增 `kind=chain` / `kind=ss`。
+  列——绝对阈值跨域尺寸不可比；**R15/P0：轨迹单位修复**——
+  `_ss_backbone_trajectory` 返回 MDA 原始 Å，R12-R14 按 nm 处理使域
+  RMSD 全部 ×10 且 SS 阈值 4.5 按 nm 比较（ss_frac 0.99 假"全域"）；
+  现出口 ÷10 转 nm、`HBOND_DIST=0.45 nm`，域值回到真值
+  （self-fit 0.5-0.6 Å、vs-rest 0.8-2.4 Å），并有单位回归测试）汇总
+  成中文"柔性解读"，写入 md summary 与报告第 5 节。`gmx_analyze`
+  新增 `kind=chain` / `kind=ss`。
   注意：MD 直接从 EM 起步，前 ~100-200 ps 属松弛段（Rg/链间 RMSD 会先跳变），
   解读时建议忽略早期段。
 - **刚性漏斗局限**：默认对接/设计基于单一刚性构象，柔性只在 MD 阶段采样；

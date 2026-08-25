@@ -645,3 +645,103 @@ def test_score_designs_esmfold_version_invalidation(tmp_path, monkeypatch):
     calls.clear()
     vh.score_designs([p0], d, tmp_path / "clean.pdb")
     assert len(calls) == 1, "version change must invalidate the cache"
+
+
+def test_score_designs_uses_scaffold_sequence(tmp_path, monkeypatch):
+    """R15/R14-v2: the designed chain is all-GLY (RF writes no residue
+    names), so score_designs accepts a seqs map with the real scaffold
+    sequence — when it matches the binder length and the PDB seq is
+    all-GLY, the real sequence goes to ESMFold."""
+    from drugagent.modules import binder as binder_mod
+    from drugagent.modules import esmfold_run as esm
+    d = tmp_path / "vhh_designs"
+    d.mkdir()
+    p0 = _design_pdb(d, "vhh_design_0.pdb")
+    (tmp_path / "clean.pdb").write_text("ATOM      1  CA GLY A  1\nEND\n")
+    captured = []
+
+    def fake_predict(seqs, **kw):
+        captured.append(tuple(seqs))
+        return {"mean_plddt": 70.0, "plddt": [80.0] * 10, "pdb": "X"}
+
+    monkeypatch.setattr(binder_mod, "_chain_ids", lambda p: ["A"])
+    monkeypatch.setattr(binder_mod, "_ca_sequence", lambda p, c: "G" * 14)
+    monkeypatch.setattr(binder_mod, "_make_complex",
+                        lambda a, b, o: open(o, "w").write("MODEL") or o)
+    monkeypatch.setattr(esm, "predict", fake_predict)
+    monkeypatch.setattr(esm, "interface_metrics",
+                        lambda comp, p: {"interface_plddt_mean": 50.0,
+                                         "interface_plddt_min": 40.0,
+                                         "n_interface_residues": 3})
+    seqs = {"vhh_design_0": ["HLTRLGLEFFVQLV"]}
+    out = vh.score_designs([p0], d, tmp_path / "clean.pdb", seqs=seqs)
+    assert out[0].get("seq_used") == "scaffold"
+    # the all-GLY PDB sequence was replaced by the scaffold sequence
+    assert any("HLTRLGLEFFVQLV" in str(s) for s in captured), captured
+    # wrong-length alt seq is ignored (stays all-GLY)
+    captured.clear()
+    (d / "scored.json").unlink()
+    out2 = vh.score_designs([p0], d, tmp_path / "clean.pdb",
+                            seqs={"vhh_design_0": ["ABC"]})
+    assert out2[0].get("seq_used") is None
+    assert all("HLTRLGLEFFVQLV" not in str(s) for s in captured)
+
+
+def test_design_vhf_rf_cautious(tmp_path, monkeypatch):
+    """R15: options.vhh_rf_cautious=false archives existing designs so
+    RF re-samples fresh ones (cautious mode otherwise skips existing
+    vhh_design_N.pdb, so reruns would reuse the first run's designs)."""
+    from drugagent.modules import vhh as vh
+    from drugagent.modules import binder as binder_mod
+    from drugagent.modules import esmfold_run as esm
+    wd = tmp_path / "04_vhh"
+    outdir = wd / "vhh_designs"
+    outdir.mkdir(parents=True)
+    (tmp_path / "clean.pdb").write_text("ATOM      1  CA GLY A  1\nEND\n")
+    (outdir / "vhh_design_0.pdb").write_text(_design_pdb_text())
+    (outdir / "vhh_design_1.pdb").write_text(_design_pdb_text())
+    seen = {}
+
+    def fake_run_cmd(cmd, **kw):
+        # record what top-level designs exist when RF starts
+        seen["top_level"] = sorted(
+            p.name for p in outdir.glob("vhh_design_*.pdb")
+            if p.stem.split("_")[-1].isdigit())
+        # RF "writes" two fresh designs
+        (outdir / "vhh_design_0.pdb").write_text(_design_pdb_text())
+        (outdir / "vhh_design_1.pdb").write_text(_design_pdb_text())
+        return 0
+
+    monkeypatch.setattr(vh, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(binder_mod, "rf_repo", lambda: tmp_path)
+    monkeypatch.setattr(binder_mod, "rf_python", lambda: "/bin/true")
+    monkeypatch.setattr(binder_mod, "pocket_hotspots", lambda *a: ["A1"])
+    monkeypatch.setattr(binder_mod, "_chain_ids", lambda p: ["A"])
+    monkeypatch.setattr(binder_mod, "_ca_sequence", lambda p, c: "GGLGG")
+    monkeypatch.setattr(binder_mod, "_make_complex",
+                        lambda a, b, o: open(o, "w").write("MODEL") or o)
+    monkeypatch.setattr(esm, "predict",
+                        lambda seqs, **kw: {"mean_plddt": 60.0,
+                                            "plddt": [70.0] * 10,
+                                            "pdb": "X"})
+    monkeypatch.setattr(esm, "interface_metrics",
+                        lambda comp, p: {"interface_plddt_mean": 50.0,
+                                         "interface_plddt_min": 40.0,
+                                         "n_interface_residues": 3})
+    state = {"options": {"fast": True, "vhh_rf_cautious": False},
+             "target_prep": {"clean_pdb": str(tmp_path / "clean.pdb"),
+                             "pocket": {"center": [0, 0, 0], "xsize": 10,
+                                        "ysize": 10, "zsize": 10}}}
+    out = vh.design_vhh(state, wd, n_designs=2)
+    assert out["n_designs"] == 2
+    # with cautious off, RF started with a clean top-level set (old
+    # designs archived) — the pre-existing files were moved away
+    assert seen["top_level"] == [], seen
+    arch = list(outdir.glob("archive_*/vhh_design_0.pdb"))
+    assert arch, "old designs must be archived, not deleted"
+    # default (cautious on): existing designs stay put
+    (outdir / "vhh_design_2.pdb").write_text(_design_pdb_text())
+    state["options"] = {"fast": True}
+    seen.clear()
+    vh.design_vhh(state, wd, n_designs=2)
+    assert "vhh_design_2.pdb" in seen["top_level"], seen
