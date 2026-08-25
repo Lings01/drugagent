@@ -22,12 +22,35 @@ from ..utils import jsave, pmap, run_cmd
 # library sources
 # --------------------------------------------------------------------------- #
 LIBRARY_SOURCES = {
+    # R18: default master library — local build, union of the two
+    # provenance files below (scripts/merge_libraries.py). No download
+    # needed when present.
+    "nci_npatlas": {
+        "url": None,
+        "alt_urls": [],
+        "size_hint": "master library: NCI-Open UNION NPAtlas, deduped by "
+                     "InChIKey (~265k, ~1.4 GB; data/libraries/nci_npatlas.sdf)",
+    },
+    "nci_open": {
+        "url": "https://dctd.cancer.gov/data-tools-biospecimens/data",
+        "alt_urls": ["https://cellminer.cancer.gov/"],
+        "size_hint": "NCI/DTP Open Chemical Repository (Dec-2010 release, "
+                     "265,242 structures, 3D, NSC ids; 1.2 GB)",
+    },
+    "npatlas": {
+        "url": "https://www.npatlas.com/",
+        "alt_urls": [],
+        "size_hint": "NPAtlas natural products (2024-09, 36,454 structures, "
+                     "2D, InChI/InChIKey; 175 MB)",
+    },
     "dtp": {
+        # legacy: third-party mirror of the NCI/DTP open set — dead
+        # (502 since R18); kept for --library dtp compat (falls back).
         "url": "http://www.dtpbase.org/download/All_Druglike_Compounds.sdf.gz",
         "alt_urls": [
             "http://www.dtpbase.org/download",
         ],
-        "size_hint": "351k compounds (~1.5 GB)",
+        "size_hint": "351k compounds (~1.5 GB) [mirror dead, use nci_npatlas]",
     },
     "chembl": {
         # date dir discovered at setup; fallback pattern
@@ -51,7 +74,8 @@ def resolve_library(opts: dict, d, base: Path | None = None) -> tuple[Path, str]
 
     The DTP/PDBBind mirrors are flaky (a 0-byte download is a known state
     of this box); a missing/corrupt < 1 MB library should not kill a run.
-    Fall back to the local ChEMBL 35 subsample (50k mols) and report it in
+    Fall back to the local master library (nci_npatlas), then the ChEMBL 35
+    subsample (50k mols), and report it in
     the returned label so state/report make the substitution explicit.
     Custom SDF paths (opts["library_path"]) do NOT fall back — a user
     pointing at a file means exactly that file.
@@ -67,7 +91,7 @@ def resolve_library(opts: dict, d, base: Path | None = None) -> tuple[Path, str]
     lib = base / f"{lib_name}.sdf"
     if lib.exists() and lib.stat().st_size > 1_000_000:
         return lib, lib_name
-    for cand in ("chembl35_small", "chembl35"):
+    for cand in ("nci_npatlas", "chembl35_small", "chembl35"):
         if cand == lib_name:
             continue
         c = base / f"{cand}.sdf"
@@ -126,6 +150,13 @@ def _parse_sdf_blocks(sdf_path: Path) -> list[tuple[str, dict, str]]:
         stripped = line.rstrip("\n")
         if not block_lines and not title and stripped:
             title = stripped
+            # R18: the title line is part of the molblock — MolFromMolBlock
+            # needs the canonical 3-line pre-header (title, comment, blank)
+            # before the V2000/V3000 counts line, so keep it in the block
+            # text (previously dropped; masked before because every
+            # deployed library carried canonical_smiles and the molblock
+            # path was never exercised).
+            block_lines.append(line)
             i += 1
             continue
         if stripped.lstrip().startswith(">  <"):

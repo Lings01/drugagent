@@ -21,7 +21,7 @@ auto-passed under `--auto`.
 | Language/env | Python (conda) | 3.12, standalone env in `env/` |
 | LLM main program | llama.cpp server (OpenAI-compatible endpoint) | local `127.0.0.1:18080`, default `qwen3.8-27b-uncensored` (needs function calling; override via `DRUGAGENT_LLM_BASE_URL` / `MODEL` / `API_KEY`) |
 | Target | RCSB download, OpenBabel, ESMFold (vendored openfold + CPU patches) | auto-modeling for sequence input |
-| Small molecules | RDKit, AutoDock Vina, GNINA 1.3.1 (ELF, CPU) | libraries: DTP / ChEMBL35 / PDBBind (auto-fallback on flaky mirrors) |
+| Small molecules | RDKit, AutoDock Vina, GNINA 1.3.1 (ELF, CPU) | libraries: **nci_npatlas master** (NCI/DTP open set ∪ NPAtlas natural products, ~265k, InChIKey-deduped) / ChEMBL35 / PDBBind (auto-fallback) |
 | Protein design | RFdiffusion (hydra), ProteinMPNN (vanilla v_48_010), ESMFold + ESM2 | de novo binders / scaffold-guided VHH |
 | MD | GROMACS 2023.1 (self-built, amber99sb-ildn), ACPYPE (GAFF2), MDAnalysis 2.10 | equilibration + replicas + auto-extension + domain-level flexibility diagnostics |
 | Reports | Plotly (interactive charts), 3Dmol.js (3D structures), WeasyPrint (PDF) | `reports/report.html` + `.pdf` |
@@ -35,7 +35,7 @@ disk ~40 GB (env + weights + libraries).
 | Module | Contents | Key tools |
 |---|---|---|
 | A Target prep | PDB file / PDB ID / FASTA / raw sequence input; integrity analysis + structure-pitfall pre-check (multi-MODEL / altloc / missing residues / metals / nucleic acids / disordered termini); agent judgment; auto + manual PDB repair; cleaning; pocket detection; PDBQT conversion | RCSB, obabel, ESMFold (sequence input only) |
-| B Small-molecule screening | Large library (DTP/ChEMBL/PDBBind or custom SDF) → standardization → physchem/ML prefilter → parallel Vina docking → GNINA rescoring → agent-set hit criteria (co-crystallized ligand redock as positive control); **flexible-target workflow (R2/R5: MD conformational ensemble → multi-conformer selection + side-chain `--flex`, consensus averaging)** | RDKit, Vina, GNINA |
+| B Small-molecule screening | Large library (nci_npatlas master / ChEMBL / PDBBind or custom SDF) → standardization → physchem/ML prefilter → parallel Vina docking → GNINA rescoring → agent-set hit criteria (co-crystallized ligand redock as positive control); **flexible-target workflow (R2/R5: MD conformational ensemble → multi-conformer selection + side-chain `--flex`, consensus averaging)** | RDKit, Vina, GNINA |
 | C Binder design | RFdiffusion de novo design + ProteinMPNN sequences + ESMFold monomer/complex scoring (interface pLDDT) + geometric interface metrics (min distance / contact pairs) | RFdiffusion, ProteinMPNN, ESMFold |
 | D Nanobody (VHH) | Track A: VHH library → ESMFold modeling → pLDDT filter (fast 35 / full 50) → **rigid docking** (fast default: **CDR-fragment docking**, ~15× speedup, per-fragment adaptive boxes) → parallel screening; Track B: RFdiffusion scaffold-guided de novo design + scaffold fidelity (`scaffold_rmsd_a`) + composite scoring | ESMFold, RFdiffusion, Vina |
 | E MD simulation | System selection (ligand / hit / binder / VHH / **apo**; modified residues auto-prefer apo) → pdb2gmx + ACPYPE → solvation / ions / EM → **NVT→NPT equilibration (position restraints, C-rescale) + burn-in trimming** → N ns × R replicas (forked from equilibrated end-state) → **convergence check + auto-extension** → RMSD/RMSF/Rg/clustering + **flexibility diagnostics** (per-chain self-fit / secondary structure / flexible-region localization / **structural-domain RMSD** / **domain vs-rest + diameter normalization** / **rigid baseline comparison (R17: √t scaling + domain-norm baseline)** / compact-unwrap against tight-box flapping) + metal-ion coordination + native nucleic-acid parametrization + cofactor/heme auto-parametrization | GROMACS 2023.1, ACPYPE, MDAnalysis |
@@ -74,7 +74,7 @@ how to read the report, number-reliability guide, FAQ, glossary).
 under `--root`, then the current directory, then the deploy dir). A
 persistent default: `export DRUGAGENT_PROJECTS_ROOT=~/mywork`.
 
-Common `run` options: `--library dtp|chembl35|pdbbind|<SDF path>`,
+Common `run` options: `--library nci_npatlas|chembl35|pdbbind|<SDF path>` (default `nci_npatlas` — the NCI/DTP ∪ NPAtlas master library),
 `--n-jobs 32`, `--md-ns 100 --md-reps 3`, `--max-steps 300` (agent step
 budget), `--no-llm` (deterministic scripted mode), `--llm-base/--llm-model`
 (LLM override). MD fine-tuning: `--md-salt` (ion concentration, M),
@@ -244,10 +244,12 @@ Chinese); here only what matters to users.
   prefix); scaffold-guided mode conditions only on SS + adjacency, so
   ~15 Å design-vs-scaffold drift is expected (quantified in the
   `scaffold_rmsd_a` field). See `data/tools/vhh_scaffolds/NOTE.md`.
-- **Small-molecule library fallback**: dtp/pdbbind mirrors are flaky
-  (measured 404 / 138-byte bad tarballs); missing or <1 MB auto-falls back
-  to chembl35_small (50k), annotated as "fallback for dtp" in state and
-  report.
+- **Small-molecule libraries (R18)**: default `nci_npatlas` is a local
+  master build — NCI/DTP open chemical repository (265,242, 3D, NSC
+  ids) ∪ NPAtlas natural products (36,454, InChIKey), deduped by
+  InChIKey (`scripts/merge_libraries.py`). The old `dtp` download mirror
+  (dtpbase.org) is dead (502); legacy `--library dtp` auto-falls back to
+  the master library, annotated in state/report as "fallback for dtp".
 - **Structure-pitfall pre-check**: `analyze_pdb` scans multi-MODEL / altloc
   / missing residues / metals / nucleic acids / disordered regions and
   suggests actions; `run_target_prep` auto-fixes the two safe items, the

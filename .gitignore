@@ -25,3 +25,6 @@ mdout.mdp
 # 本地测试与中间产物（不入仓库）
 tests/
 temp.top*
+
+# 根目录临时上传的 SDF（正式库在 data/libraries/，已忽略）
+/*.sdf

@@ -18,7 +18,7 @@
 | 语言/环境 | Python (conda) | 3.12，`env/` 独立环境 |
 | LLM 主程序 | llama.cpp server（OpenAI 兼容端点） | 本地 `127.0.0.1:18080`，默认 `qwen3.8-27b-uncensored`（需 function calling；可用 `DRUGAGENT_LLM_BASE_URL`/`MODEL`/`API_KEY` 覆盖） |
 | 靶点 | RCSB 下载、OpenBabel、ESMFold（vendor openfold + CPU 补丁） | 序列输入时自动建模 |
-| 小分子 | RDKit、AutoDock Vina、GNINA 1.3.1 (ELF, CPU) | 库：DTP / ChEMBL35 / PDBBind（镜像不稳自动回退） |
+| 小分子 | RDKit、AutoDock Vina、GNINA 1.3.1 (ELF, CPU) | 库：**nci_npatlas 主库**（NCI/DTP 开放库 ∪ NPAtlas 天然产物，约 26.5 万，InChIKey 去重）/ ChEMBL35 / PDBBind（自动回退） |
 | 蛋白设计 | RFdiffusion (hydra)、ProteinMPNN (vanilla v_48_010)、ESMFold + ESM2 | de novo binder / scaffold-guided VHH |
 | MD | GROMACS 2023.1（自编译，amber99sb-ildn）、ACPYPE (GAFF2)、MDAnalysis 2.10 | 平衡段+多副本+自动延长+域级柔性诊断 |
 | 报告 | Plotly（交互图）、3Dmol.js（3D 结构）、WeasyPrint（PDF） | `reports/report.html` + `.pdf` |
@@ -31,7 +31,7 @@
 | 模块 | 内容 | 关键工具 |
 |---|---|---|
 | A 靶点准备 | PDB 文件 / PDB ID / FASTA / 裸序列输入；完整性分析 + 结构坑预检（多 MODEL/altloc/缺失残基/金属/核酸/无序末端）；agent 判定；自动+手动修复 PDB；清洗；口袋检测；PDBQT 转换 | RCSB, obabel, ESMFold（仅序列输入） |
-| B 小分子筛选 | 大库（DTP/ChEMBL/PDBBind 或自定义 SDF）→ 标准化 → 理化/ML 预过滤 → Vina 并行对接 → GNINA 复打分 → agent 定命中标准（参考配体重对接做阳性对照）；**柔性靶点工作流（R2/R5：MD 构象系综 → 多构象选择 + 侧链 `--flex`，consensus 平均分）** | RDKit, Vina, GNINA |
+| B 小分子筛选 | 大库（nci_npatlas 主库 / ChEMBL / PDBBind 或自定义 SDF）→ 标准化 → 理化/ML 预过滤 → Vina 并行对接 → GNINA 复打分 → agent 定命中标准（参考配体重对接做阳性对照）；**柔性靶点工作流（R2/R5：MD 构象系综 → 多构象选择 + 侧链 `--flex`，consensus 平均分）** | RDKit, Vina, GNINA |
 | C binder 设计 | RFdiffusion 从头设计 + ProteinMPNN 序列 + ESMFold 单体/复合物打分（界面 pLDDT）+ 几何接口度量（min 距离/接触对） | RFdiffusion, ProteinMPNN, ESMFold |
 | D 纳米抗体 | 轨道A：VHH 库 → ESMFold 建模 → pLDDT 过滤（fast 35 / full 50）→ **刚性对接**（fast 默认 **CDR 片段对接**，~15× 提速，自适应盒子）→ 并行筛选；轨道B：RFdiffusion scaffold-guided 从头设计 + scaffold 保真度（`scaffold_rmsd_a`）+ 综合评分 | ESMFold, RFdiffusion, Vina |
 | E MD 模拟 | 体系选择（配体/hit/binder/vhh/**apo**；修饰残基自动偏好 apo）→ pdb2gmx + ACPYPE → 溶胀/加离子/EM → **NVT→NPT 平衡（位置约束，C-rescale）+ 烧入剔除** → N ns × R 副本（自平衡分叉）→ **收敛判定 + 自动延长** → RMSD/RMSF/Rg/聚类 + **柔性诊断**（分链自拟合/二级结构/柔性区定位/**结构域 RMSD**/**域 vs-rest + 直径归一**/**刚性基线对照（R17：√t 折算 + 域 norm 基线）**/compact-unwrap 防紧凑盒 flapping）+ 金属离子协调 + 核酸原生参数化 + 辅因子/血红素自动参数化 | GROMACS 2023.1, ACPYPE, MDAnalysis |
@@ -70,7 +70,7 @@ drugagent report --project projects/<项目>
 当前目录、部署 projects/ 下查找）。想固定默认输出目录：
 `export DRUGAGENT_PROJECTS_ROOT=~/mywork`。
 
-常用 `run` 参数：`--library dtp|chembl35|pdbbind|<SDF路径>`，`--n-jobs 32`，
+常用 `run` 参数：`--library nci_npatlas|chembl35|pdbbind|<SDF路径>`（默认 `nci_npatlas`——NCI/DTP ∪ NPAtlas 主库），`--n-jobs 32`，
 `--md-ns 100 --md-reps 3`，`--max-steps 300`（agent 步数预算），
 `--no-llm`（确定性脚本模式），`--llm-base/--llm-model`（覆盖 LLM）。
 MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 0.01`
@@ -208,8 +208,11 @@ RMSD/RMSF/Rg 分析 + HTML/PDF 报告。完整实例见 `projects/r10_e2e/`
   （目录名 `vhh_` 是历史前缀）；scaffold-guided 只条件 SS+邻接，设计骨架
   对 scaffold 漂移 15 Å 量级是预期（`scaffold_rmsd_a` 字段量化）。
   详见 `data/tools/vhh_scaffolds/NOTE.md`。
-- **小分子库回退**：dtp/pdbbind 镜像不稳（实测 404/138 字节坏 tarball），
-  缺失或 <1MB 自动回退 chembl35_small（50k），state 与报告标明 fallback。
+- **小分子库（R18）**：默认 `nci_npatlas` 是本地主库——NCI/DTP 开放化合物库
+  （265,242 个，3D，NSC 编号）∪ NPAtlas 天然产物（36,454 个，带 InChIKey），
+  按 InChIKey 取并集去重（`scripts/merge_libraries.py`）。旧的 `dtp` 下载
+  镜像（dtpbase.org）已死（502）；`--library dtp` 会自动回退到主库，
+  state/报告标注 "fallback for dtp"。
 - **结构坑预检**：`analyze_pdb` 扫多 MODEL/altloc/缺失残基/金属/核酸/无序区
   并给建议 action；`run_target_prep` 自动修两个安全项，其余交 agent 判断
   （decisions 留痕），报告第 1 节展示全部发现与修复。

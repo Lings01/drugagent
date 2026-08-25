@@ -137,7 +137,7 @@ def _make_prompt_fn() -> callable:
 # --------------------------------------------------------------------------- #
 @app.command()
 def setup(
-    libraries: str = typer.Option("dtp", help="下载哪些库: dtp,chembl,pdbbind,vhh,all"),
+    libraries: str = typer.Option("all", help="下载哪些库: dtp,chembl,pdbbind,vhh,all (默认)"),
     gromacs: bool = typer.Option(True, help="构建/复用 GROMACS 2023"),
     tools: bool = typer.Option(True, help="安装 vina/gnina/fpocket/3Dmol"),
     rfdiffusion: bool = typer.Option(True, help="部署 RFdiffusion + 权重"),
@@ -158,7 +158,7 @@ def run(
     fast: bool = typer.Option(False, help="快速模式 (小规模验证)"),
     auto: bool = typer.Option(False, help="检查点自动通过 (不等人)"),
     name: str = typer.Option(None, help="项目名 (默认时间戳)"),
-    library: str = typer.Option("dtp", help="小分子库: dtp/chembl/pdbbind 或 SDF 路径"),
+    library: str = typer.Option("nci_npatlas", help="小分子库: nci_npatlas(主库, 默认)/dtp/chembl35/pdbbind 或 SDF 路径"),
     n_jobs: int = typer.Option(32, help="并行度"),
     md_ns: float = typer.Option(None, help="MD 时长 (ns), 覆盖默认"),
     md_reps: int = typer.Option(None, help="MD 重复次数, 覆盖默认"),

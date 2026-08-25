@@ -90,8 +90,8 @@ drugagent run \
 1. **靶点准备**：下载/读取 PDB → 完整性检查（多 MODEL 叠加？altloc？缺失残基？
    金属？核酸？无序末端？）→ 自动修复安全项 → 清洗 → 口袋检测 → 转 PDBQT。
    产物：`projects/mydock/01_target/`（`receptor.pdbqt`、`pocket.json`、`clean.pdb`）。
-2. **库解析**：`dtp` 库缺失/损坏时自动回退 `chembl35_small`（约 5 万化合物，
-   state 和报告会标注 "fallback for dtp"）。
+2. **库解析**：默认用本地主库 `nci_npatlas`（约 26.5 万化合物——NCI/DTP 开放化合物库 ∪ NPAtlas 天然产物，InChIKey 去重）。
+   请求的库缺失/损坏时按 `nci_npatlas` → `chembl35_small`（约 5 万）自动回退，state/报告标注 "fallback for …"。
 3. **标准化 + 预过滤**：RDKit 标准化、理化性质过滤（Lipinski 等）。
 4. **对接**：Vina 并行对接（默认 32 进程，`--n-jobs` 可调）。
 5. **复打分**：GNINA 对 top 结果复打分。
@@ -360,7 +360,7 @@ binder 类型——都由 LLM 决定并留痕；`--no-llm` 模式用默认值。
 | `--fast / --no-fast` | full | 验证规模 vs 生产规模 |
 | `--auto / --no-auto` | 交互 | 检查点自动通过 |
 | `--name` | 时间戳 | 项目名 |
-| `--library` | `dtp` | `dtp` / `chembl35` / `pdbbind` / 自定义 SDF 路径（dtp 损坏自动回退 chembl35_small） |
+| `--library` | `nci_npatlas` | `nci_npatlas`（主库：NCI/DTP ∪ NPAtlas，约 26.5 万）/ `chembl35` / `chembl35_small` / `pdbbind` / 自定义 SDF 路径；缺失/损坏自动经主库回退 |
 | `--n-jobs` | 32 | 对接/打分并行度 |
 | `--md-ns` | 100 (full) / 5 (fast) | MD 时长 ns |
 | `--md-reps` | 3 | MD 副本数 |
@@ -393,9 +393,10 @@ binder 类型——都由 LLM 决定并留痕；`--no-llm` 模式用默认值。
   归蛋白、过滤后跑纯蛋白）。
 
 **Q2：报 "library dtp missing/corrupt (0 bytes)" 要紧吗？**
-不要紧，自动回退 chembl35_small（5 万化合物），state 和报告会标注
-`fallback for dtp`。想修库：`drugagent setup --libraries dtp`
-（dtpbase.org 镜像不稳时可试 `--libraries pdbbind`，软失败不打断 setup）。
+不要紧——`dtp` 是旧默认，指向的镜像已死（dtpbase.org，502）。现在默认
+是本地主库 `nci_npatlas`；库缺失/损坏时按 `nci_npatlas` →
+`chembl35_small`（5 万）自动回退，state/报告标注 `fallback for …`。
+想补 PDBBind：`drugagent setup --libraries pdbbind`（软失败不打断 setup）。
 
 **Q3：跑一半断了/机器重启了？**
 `resume --project <目录>`。产物幂等（已完成的 mdrun/对接/PDBQT 自动复用），

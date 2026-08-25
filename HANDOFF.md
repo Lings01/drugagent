@@ -41,6 +41,29 @@ r10_e2e 延长 + rigid_crambin + flex_cdk2 三个作业运行中（收口见 R18
    糖基化酶核心非 VHH；scaffold-guided 语义；替换方法）。
 5. **e2e**：218/218 快测绿（+6）。r10_e2e 延长 3×5 ns 后台运行中。
 
+## 第 18 轮进行中（R17 后本会话工作，详见 git log）
+1. **入口点 + 当前文件夹下跑**：`env/bin/pip install -e . --no-deps` +
+   `~/.local/bin/drugagent` 软链（用户直接 `drugagent ...`，CWD 无关，
+   部署根/输出根分离）；`run/status/resume/rerun/report` 加 `--root`
+   （项目建在 `<root>/<name>`，`--root .` = 当前文件夹；裸项目名解析
+   顺序 --root → CWD → 部署 projects/；`DRUGAGENT_PROJECTS_ROOT` 可固定
+   默认）。220/220 快测绿。
+2. **主小分子库 nci_npatlas（本提交）**：
+   - `data/libraries/nci_open_2012-05-01.sdf`（1.2 GB）：NCI/DTP DIS 导出
+     （Dec-2010 release，265,242 条，3D 坐标，NSC 编号；RDKit 99.78% 可
+     解析）。来源 dctd.cancer.gov（CellMiner 为现行官方入口）；旧
+     dtpbase.org 镜像已死（502，Wayback 无快照）。
+   - `data/libraries/npatlas_2024_09.sdf`（175 MB）：NPAtlas 2024-09
+     （36,454 天然产物，2D，compound_name/InChI/InChIKey；99.997% 可解析；
+     MW 中位 405，约 21% >600 对接体积吃亏——已知取舍）。
+   - `scripts/merge_libraries.py` → `data/libraries/nci_npatlas.sdf`：
+     InChIKey 并集去重（first-seen wins，NCI 先处理；原始记录文本保留，
+     CRLF→LF；未解析记录保留但不参与去重）。
+     `Defaults.default_library = "nci_npatlas"`；回退链改为
+     nci_npatlas → chembl35_small → chembl35（label 仍标 "fallback for …"）。
+     0 字节坏 dtp.sdf.gz 已删；`--library dtp` 现自动回退主库。
+   - `.gitignore` 加 `/*.sdf`（根目录上传的 SDF 不进仓库；data/ 本已忽略）。
+
 ## 第 16 轮已完成（见 ROUNDLOG 详情）
 1. **P0a 纯蛋白 target_prep**：无配体靶点 `lig_pdb` 未初始化 →
    `UnboundLocalError`。修：`lig_pdb=None` 初始化；纯蛋白 e2e 走全程

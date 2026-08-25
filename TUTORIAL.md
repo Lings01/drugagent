@@ -104,9 +104,11 @@ Every parameter explained:
    termini?) → auto-repair of the safe items → cleaning → pocket
    detection → PDBQT conversion. Artifacts: `projects/mydock/01_target/`
    (`receptor.pdbqt`, `pocket.json`, `clean.pdb`).
-2. **Library resolution**: if the `dtp` library is missing/corrupt it
-   auto-falls back to `chembl35_small` (~50k compounds; state and report
-   are annotated "fallback for dtp").
+2. **Library resolution**: the default is the local master library
+   `nci_npatlas` (~265k compounds — NCI/DTP open chemical repository ∪
+   NPAtlas natural products, InChIKey-deduped). If a requested library
+   is missing/corrupt it auto-falls back through `nci_npatlas` →
+   `chembl35_small` (~50k), annotated "fallback for …" in state/report.
 3. **Standardization + prefilter**: RDKit standardization, physchem
    filters (Lipinski, etc.).
 4. **Docking**: parallel Vina (32 jobs by default, `--n-jobs` to change).
@@ -413,7 +415,7 @@ the LLM and recorded. `--no-llm` mode uses defaults.
 | `--fast / --no-fast` | full | validation scale vs production scale |
 | `--auto / --no-auto` | interactive | auto-pass checkpoints |
 | `--name` | timestamp | project name |
-| `--library` | `dtp` | `dtp` / `chembl35` / `pdbbind` / custom SDF path (dtp auto-falls back to chembl35_small when corrupt) |
+| `--library` | `nci_npatlas` | `nci_npatlas` (master: NCI/DTP ∪ NPAtlas, ~265k) / `chembl35` / `chembl35_small` / `pdbbind` / custom SDF path; missing/corrupt libs auto-fall back through the master library |
 | `--n-jobs` | 32 | docking/scoring parallelism |
 | `--md-ns` | 100 (full) / 5 (fast) | MD length, ns |
 | `--md-reps` | 3 | MD replicas |
@@ -452,10 +454,12 @@ the LLM and recorded. `--no-llm` mode uses defaults.
   protein).
 
 **Q2: I see "library dtp missing/corrupt (0 bytes)". Important?**
-No — it auto-falls back to chembl35_small (50k compounds), annotated as
-`fallback for dtp` in state and report. To repair the library:
-`drugagent setup --libraries dtp` (the dtpbase.org
-mirror is flaky; `--libraries pdbbind` soft-fails without breaking setup).
+No — `dtp` was the old default pointing at a now-dead mirror
+(dtpbase.org, 502). The current default is the local master library
+`nci_npatlas`; a missing/corrupt library auto-falls back through
+`nci_npatlas` → `chembl35_small` (50k), annotated `fallback for …` in
+state and report. `drugagent setup --libraries pdbbind` soft-fails
+without breaking setup.
 
 **Q3: It died halfway / the machine rebooted?**
 `resume --project <dir>`. Artifacts are idempotent (finished

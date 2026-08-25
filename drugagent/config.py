@@ -106,7 +106,10 @@ def gmx_bin(name: str) -> Path:
 @dataclass
 class Defaults:
     # screening
-    default_library: str = "dtp"
+    # R18: master library = NCI-Open (NCI/DTP, 265k) UNION NPAtlas
+    # (natural products, 36k), deduped by InChIKey -> nci_npatlas.sdf
+    # (scripts/merge_libraries.py). The old "dtp" mirror is dead.
+    default_library: str = "nci_npatlas"
     screen_max_ligands: int = 50_000
     screen_min_ligands: int = 500
     screen_time_budget_h: float = 24.0
