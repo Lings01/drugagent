@@ -663,6 +663,10 @@ def to_pdbqt(pdb: Path, out: Path, *, keep_resnames: list[str] | None = None,
     """PDB -> PDBQT (obabel). `flex=False` for rigid receptors: this vina
     build rejects molecule-graph keywords (ROOT/TORSDOF) in rigid receptors
     but requires them in flex ligands."""
+    if not pdb.is_file():
+        raise FileNotFoundError(
+            f"PDB not found: {pdb} (relative paths are resolved against "
+            f"the project dir — check the stage layout)")
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.is_file() and out.stat().st_size > 0:
         # cache: deterministic conversion — but re-convert if the source PDB

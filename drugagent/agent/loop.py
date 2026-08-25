@@ -138,7 +138,7 @@ class Tool:
 
     def call(self, ctx: Ctx, **args: Any) -> dict:
         try:
-            res = self.fn(ctx, **args)
+            res = self.fn(ctx, **_resolve_ctx_paths(ctx, args))
         except ToolError as e:
             return {"ok": False, "error": str(e)}
         except Exception as e:  # noqa: BLE001
@@ -148,6 +148,28 @@ class Tool:
             res = {"result": res}
         res.setdefault("ok", True)
         return res
+
+
+def _resolve_ctx_paths(ctx: "Ctx", args: dict) -> dict:
+    """R18: LLM/scripted steps pass stage-relative paths
+    ('01_target/receptor.pdb'). Tools already re-root OUTPUT paths via
+    _p(), but INPUT paths used to stay CWD-relative — fatal for
+    `run --root .` from any folder. Central fix: a relative arg that
+    EXISTS under the project dir and NOT relative to CWD is re-rooted.
+    Existence-based, so SMILES/resname-like strings are never touched."""
+    for k, v in list(args.items()):
+        if not (isinstance(v, str) and "/" in v and len(v) < 400):
+            continue
+        p = Path(v)
+        if p.is_absolute():
+            continue
+        proj = ctx.project_dir / p
+        try:
+            if proj.exists() and not p.exists():
+                args[k] = str(proj)
+        except OSError:
+            pass
+    return args
 
 
 def build_tools() -> list[Tool]:
