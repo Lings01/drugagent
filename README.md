@@ -1,229 +1,266 @@
-# DrugAgent — 药物发现一体化 Agent
+# DrugAgent — An Integrated Drug-Discovery Agent
 
-**流水线是工具箱，LLM 是主程序。** DrugAgent 2.0 用一个 ReAct 主循环
-（LLM + 原生 function calling）驱动整个药物发现流程：LLM 自己规划、调用
-~41 个细粒度工具、自己写 MDP/选力场、失败时自己读日志排错重试；
-4 个固定里程碑检查点 + LLM 随时发起的动态确认，`--auto` 时自动通过。
+**The pipeline is a toolbox; the LLM is the main program.** DrugAgent 2.0
+drives the entire drug-discovery workflow with a single ReAct main loop
+(LLM + native function calling): the LLM plans on its own, invokes ~41
+fine-grained tools, writes its own MDP files / picks force fields, and
+reads logs to self-diagnose and retry on failure; 4 fixed milestone
+checkpoints + dynamic confirmations the LLM can raise at any time, all
+auto-passed under `--auto`.
 
-- 📖 **使用教程（零基础 → 独立使用）**：[TUTORIAL.md](TUTORIAL.md)
-- 🏛 架构设计：[DESIGN.md](DESIGN.md)
-- 📦 环境与坑的权威清单：[HANDOFF.md](HANDOFF.md)
-- 📜 迭代历史（17 轮，每轮 计划/结果/反思）：[ROUNDLOG.md](ROUNDLOG.md)
+- 🇨🇳 **中文版 (Chinese)**: [README.zh-CN.md](README.zh-CN.md) · [TUTORIAL.zh-CN.md](TUTORIAL.zh-CN.md)
+- 📖 **User tutorial (zero background → self-sufficient)**: [TUTORIAL.md](TUTORIAL.md)
+- 🏛 Architecture: [DESIGN.md](DESIGN.md) *(in Chinese)*
+- 📦 Environment & known pitfalls (authoritative list): [HANDOFF.md](HANDOFF.md) *(in Chinese)*
+- 📜 Iteration log (17 rounds, each with plan / results / reflection): [ROUNDLOG.md](ROUNDLOG.md) *(in Chinese)*
 
-## 技术栈
+## Tech Stack
 
-| 层 | 组件 | 版本/说明 |
+| Layer | Component | Version / Notes |
 |---|---|---|
-| 语言/环境 | Python (conda) | 3.12，`env/` 独立环境 |
-| LLM 主程序 | llama.cpp server（OpenAI 兼容端点） | 本地 `127.0.0.1:18080`，默认 `qwen3.8-27b-uncensored`（需 function calling；可用 `DRUGAGENT_LLM_BASE_URL`/`MODEL`/`API_KEY` 覆盖） |
-| 靶点 | RCSB 下载、OpenBabel、ESMFold（vendor openfold + CPU 补丁） | 序列输入时自动建模 |
-| 小分子 | RDKit、AutoDock Vina、GNINA 1.3.1 (ELF, CPU) | 库：DTP / ChEMBL35 / PDBBind（镜像不稳自动回退） |
-| 蛋白设计 | RFdiffusion (hydra)、ProteinMPNN (vanilla v_48_010)、ESMFold + ESM2 | de novo binder / scaffold-guided VHH |
-| MD | GROMACS 2023.1（自编译，amber99sb-ildn）、ACPYPE (GAFF2)、MDAnalysis 2.10 | 平衡段+多副本+自动延长+域级柔性诊断 |
-| 报告 | Plotly（交互图）、3Dmol.js（3D 结构）、WeasyPrint（PDF） | `reports/report.html` + `.pdf` |
-| 测试 | pytest | 218 快测 + 15 slow e2e |
+| Language/env | Python (conda) | 3.12, standalone env in `env/` |
+| LLM main program | llama.cpp server (OpenAI-compatible endpoint) | local `127.0.0.1:18080`, default `qwen3.8-27b-uncensored` (needs function calling; override via `DRUGAGENT_LLM_BASE_URL` / `MODEL` / `API_KEY`) |
+| Target | RCSB download, OpenBabel, ESMFold (vendored openfold + CPU patches) | auto-modeling for sequence input |
+| Small molecules | RDKit, AutoDock Vina, GNINA 1.3.1 (ELF, CPU) | libraries: DTP / ChEMBL35 / PDBBind (auto-fallback on flaky mirrors) |
+| Protein design | RFdiffusion (hydra), ProteinMPNN (vanilla v_48_010), ESMFold + ESM2 | de novo binders / scaffold-guided VHH |
+| MD | GROMACS 2023.1 (self-built, amber99sb-ildn), ACPYPE (GAFF2), MDAnalysis 2.10 | equilibration + replicas + auto-extension + domain-level flexibility diagnostics |
+| Reports | Plotly (interactive charts), 3Dmol.js (3D structures), WeasyPrint (PDF) | `reports/report.html` + `.pdf` |
+| Tests | pytest | 218 fast + 15 slow e2e (tests are local, see below) |
 
-硬件：64 核 CPU 即可（无 GPU 自动全 CPU）；磁盘 ~40 GB（环境+权重+库）。
+Hardware: 64 CPU cores is enough (no GPU → fully automatic CPU mode);
+disk ~40 GB (env + weights + libraries).
 
-## 模块（工具箱覆盖的功能）
+## Modules (what the toolbox covers)
 
-| 模块 | 内容 | 关键工具 |
+| Module | Contents | Key tools |
 |---|---|---|
-| A 靶点准备 | PDB 文件 / PDB ID / FASTA / 裸序列输入；完整性分析 + 结构坑预检（多 MODEL/altloc/缺失残基/金属/核酸/无序末端）；agent 判定；自动+手动修复 PDB；清洗；口袋检测；PDBQT 转换 | RCSB, obabel, ESMFold（仅序列输入） |
-| B 小分子筛选 | 大库（DTP/ChEMBL/PDBBind 或自定义 SDF）→ 标准化 → 理化/ML 预过滤 → Vina 并行对接 → GNINA 复打分 → agent 定命中标准（参考配体重对接做阳性对照）；**柔性靶点工作流（R2/R5：MD 构象系综 → 多构象选择 + 侧链 `--flex`，consensus 平均分）** | RDKit, Vina, GNINA |
-| C binder 设计 | RFdiffusion 从头设计 + ProteinMPNN 序列 + ESMFold 单体/复合物打分（界面 pLDDT）+ 几何接口度量（min 距离/接触对） | RFdiffusion, ProteinMPNN, ESMFold |
-| D 纳米抗体 | 轨道A：VHH 库 → ESMFold 建模 → pLDDT 过滤（fast 35 / full 50）→ **刚性对接**（fast 默认 **CDR 片段对接**，~15× 提速，自适应盒子）→ 并行筛选；轨道B：RFdiffusion scaffold-guided 从头设计 + scaffold 保真度（`scaffold_rmsd_a`）+ 综合评分 | ESMFold, RFdiffusion, Vina |
-| E MD 模拟 | 体系选择（配体/hit/binder/vhh/**apo**；修饰残基自动偏好 apo）→ pdb2gmx + ACPYPE → 溶胀/加离子/EM → **NVT→NPT 平衡（位置约束，C-rescale）+ 烧入剔除** → N ns × R 副本（自平衡分叉）→ **收敛判定 + 自动延长** → RMSD/RMSF/Rg/聚类 + **柔性诊断**（分链自拟合/二级结构/柔性区定位/**结构域 RMSD**/**域 vs-rest + 直径归一**/**刚性基线对照（R17：√t 折算 + 域 norm 基线）**/compact-unwrap 防紧凑盒 flapping）+ 金属离子协调 + 核酸原生参数化 + 辅因子/血红素自动参数化 | GROMACS 2023.1, ACPYPE, MDAnalysis |
+| A Target prep | PDB file / PDB ID / FASTA / raw sequence input; integrity analysis + structure-pitfall pre-check (multi-MODEL / altloc / missing residues / metals / nucleic acids / disordered termini); agent judgment; auto + manual PDB repair; cleaning; pocket detection; PDBQT conversion | RCSB, obabel, ESMFold (sequence input only) |
+| B Small-molecule screening | Large library (DTP/ChEMBL/PDBBind or custom SDF) → standardization → physchem/ML prefilter → parallel Vina docking → GNINA rescoring → agent-set hit criteria (co-crystallized ligand redock as positive control); **flexible-target workflow (R2/R5: MD conformational ensemble → multi-conformer selection + side-chain `--flex`, consensus averaging)** | RDKit, Vina, GNINA |
+| C Binder design | RFdiffusion de novo design + ProteinMPNN sequences + ESMFold monomer/complex scoring (interface pLDDT) + geometric interface metrics (min distance / contact pairs) | RFdiffusion, ProteinMPNN, ESMFold |
+| D Nanobody (VHH) | Track A: VHH library → ESMFold modeling → pLDDT filter (fast 35 / full 50) → **rigid docking** (fast default: **CDR-fragment docking**, ~15× speedup, per-fragment adaptive boxes) → parallel screening; Track B: RFdiffusion scaffold-guided de novo design + scaffold fidelity (`scaffold_rmsd_a`) + composite scoring | ESMFold, RFdiffusion, Vina |
+| E MD simulation | System selection (ligand / hit / binder / VHH / **apo**; modified residues auto-prefer apo) → pdb2gmx + ACPYPE → solvation / ions / EM → **NVT→NPT equilibration (position restraints, C-rescale) + burn-in trimming** → N ns × R replicas (forked from equilibrated end-state) → **convergence check + auto-extension** → RMSD/RMSF/Rg/clustering + **flexibility diagnostics** (per-chain self-fit / secondary structure / flexible-region localization / **structural-domain RMSD** / **domain vs-rest + diameter normalization** / **rigid baseline comparison (R17: √t scaling + domain-norm baseline)** / compact-unwrap against tight-box flapping) + metal-ion coordination + native nucleic-acid parametrization + cofactor/heme auto-parametrization | GROMACS 2023.1, ACPYPE, MDAnalysis |
 
-## 快速开始
+## Quick Start
 
 ```bash
 cd /home/data/lrs/drug/drugagent
 
-# 1) 一键环境配置（幂等，可重复执行）
+# 1) One-shot environment setup (idempotent, re-runnable)
 env/bin/python -m drugagent.setup
 
-# 2) 快速端到端验证（1HVI 靶点，全模块，小规模，无人值守）
+# 2) Fast end-to-end validation (1HVI target, all modules, small scale, unattended)
 env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast --auto
 
-# 3) 生产运行（检查点交互：批准/修改/中止）
+# 3) Production run (interactive checkpoints: approve / modify / abort)
 env/bin/python -m drugagent.cli run --target 1HVI --modules screen,binder,vhh,md
-env/bin/python -m drugagent.cli resume --project projects/<项目>
+env/bin/python -m drugagent.cli resume --project projects/<project>
 
-# 4) 状态 / 报告
-env/bin/python -m drugagent.cli status --project projects/<项目>
-env/bin/python -m drugagent.cli report --project projects/<项目>
+# 4) Status / reports
+env/bin/python -m drugagent.cli status --project projects/<project>
+env/bin/python -m drugagent.cli report --project projects/<project>
 ```
 
-零基础用户请从 [TUTORIAL.md](TUTORIAL.md) 开始（含逐参数解释、报告读法、
-数字可信度指南、FAQ、术语表）。
+New users: start with [TUTORIAL.md](TUTORIAL.md) (per-parameter explanations,
+how to read the report, number-reliability guide, FAQ, glossary).
 
-常用 `run` 参数：`--library dtp|chembl35|pdbbind|<SDF路径>`，`--n-jobs 32`，
-`--md-ns 100 --md-reps 3`，`--max-steps 300`（agent 步数预算），
-`--no-llm`（确定性脚本模式），`--llm-base/--llm-model`（覆盖 LLM）。
-MD 细调：`--md-salt`（离子浓度 M）、`--md-divalent MG --md-divalent-m 0.01`
-（二价抗衡离子）、`--md-extend-ns`（自动延长步长 ns）、
-`--md-max-extensions`（自动延长轮数）、`--md-burn-in-ps`（烧入段剔除）、
-`--md-system`（强制 MD 体系）。VHH：`--vhh-plddt-min`、`--vhh-dock-flex`、
-`--vhh-dock-cdr-only`。完整参数表见 TUTORIAL §9。
+Common `run` options: `--library dtp|chembl35|pdbbind|<SDF path>`,
+`--n-jobs 32`, `--md-ns 100 --md-reps 3`, `--max-steps 300` (agent step
+budget), `--no-llm` (deterministic scripted mode), `--llm-base/--llm-model`
+(LLM override). MD fine-tuning: `--md-salt` (ion concentration, M),
+`--md-divalent MG --md-divalent-m 0.01` (divalent counterions),
+`--md-extend-ns` (auto-extension step, ns), `--md-max-extensions`
+(auto-extension rounds), `--md-burn-in-ps` (burn-in trimming),
+`--md-system` (force the MD system). VHH: `--vhh-plddt-min`,
+`--vhh-dock-flex`, `--vhh-dock-cdr-only`. Full option table: TUTORIAL §9.
 
-排错提示：外部命令（gmx/vina/...）失败时异常信息自带日志尾部（最近 40 行），
-直接看报错即可，不用手动翻日志文件。
+Debugging hint: when an external command (gmx/vina/…) fails, the exception
+already carries the tail of the log (last 40 lines) — just read the error,
+no manual log digging.
 
-## Agent 架构（2.0）
+## Agent Architecture (2.0)
 
-- **主循环** `drugagent/agent/loop.py`：LLM（OpenAI 兼容端点）每轮返回
-  tool_calls → 执行 → 结果回灌 → 循环；终止于 `finish` 工具 / 预算耗尽 / 人工介入。
-- **工具** `drugagent/agent/tools_*.py`：41 个工具 = 元工具（文件/shell/决策/确认）
-  + 五个阶段的细粒度工具 + 五个 `run_*` 整段确定性兜底工具（1.0 流水线整体保留）。
-- **参数主权**：力场由 `gmx_env` 列出、agent 选择；MDP 由 agent 自己
-  `write_file`（模板只是起点）；盒子/盐浓度/barostat/dt 均可改；
-  每个关键决定经 `record_decision` 留痕（`decisions.json`，报告中展示）。
-- **排错**：工具失败 → agent 读日志（`read_file`）→ 诊断 → `edit_file` 打补丁 →
-  重试；同一问题修 3 次仍失败则 `ask_human`。
-- **检查点**：固定 4 个（target / screening / design / md）+ 动态 `ask_human`；
-  `--auto` 自动通过并记录。
-- **状态**：项目目录是唯一事实源。`state.json` 保存阶段索引；
-  `agent/transcript.jsonl` 记录完整对话+工具调用（resume = 重放 transcript 继续）；
-  两层幂等：工具产物级（已完成的 mdrun/对接/PDBQT 自动复用）+
-  **阶段级（R11/G8：`run_*` 工具在 state.json 阶段段完整时整体跳过，
-  `force=true` 强制重跑；重启崩溃的 e2e 不再整段重跑已完成的 35 分钟筛选）**。
+- **Main loop** `drugagent/agent/loop.py`: each round the LLM
+  (OpenAI-compatible endpoint) returns tool_calls → execute → feed results
+  back → loop; terminates on the `finish` tool / budget exhaustion / human
+  intervention.
+- **Tools** `drugagent/agent/tools_*.py`: 41 tools = meta-tools
+  (file/shell/decision/confirmation) + fine-grained tools for the five
+  stages + five `run_*` whole-stage deterministic fallback tools (the 1.0
+  pipeline kept intact).
+- **Parameter sovereignty**: force fields listed by `gmx_env`, chosen by
+  the agent; the MDP is written by the agent itself (`write_file`, the
+  template is only a starting point); box / salt / barostat / dt all
+  adjustable; every key decision is recorded via `record_decision`
+  (`decisions.json`, shown in the report).
+- **Self-debugging**: tool failure → agent reads the log (`read_file`) →
+  diagnoses → patches with `edit_file` → retries; after 3 failed fixes for
+  the same problem it calls `ask_human`.
+- **Checkpoints**: 4 fixed (target / screening / design / md) + dynamic
+  `ask_human`; `--auto` auto-passes and records.
+- **State**: the project directory is the single source of truth.
+  `state.json` stores the stage index; `agent/transcript.jsonl` records the
+  full conversation + tool calls (resume = replay transcript and continue);
+  two-layer idempotency: tool-artifact level (finished mdrun/docking/PDBQT
+  are reused automatically) + **stage level (R11/G8: `run_*` tools skip the
+  whole stage when its state.json section is complete; `force=true` forces
+  a rerun — a crashed e2e no longer re-runs an already-finished 35-minute
+  screening stage)**.
 
 ## LLM
 
-默认 `http://127.0.0.1:18080/v1` / `qwen3.8-27b-uncensored`（本地 llama.cpp，
-需支持 function calling）。可用环境变量覆盖：
-`DRUGAGENT_LLM_BASE_URL` / `DRUGAGENT_LLM_MODEL` / `DRUGAGENT_LLM_API_KEY`。
+Default `http://127.0.0.1:18080/v1` / `qwen3.8-27b-uncensored` (local
+llama.cpp, must support function calling). Override with environment
+variables: `DRUGAGENT_LLM_BASE_URL` / `DRUGAGENT_LLM_MODEL` /
+`DRUGAGENT_LLM_API_KEY`.
 
-## 目录结构
+## Directory Layout
 
 ```
-/home/data/lrs/drug/drugagent/        # 项目根（持久盘）
-├── env/                              # python 环境 (py3.12, conda)
-├── data/
-│   ├── libraries/                    # 小分子库 SDF / VHH 库 fasta
-│   ├── weights/                      # ESMFold/ESM2 权重、torch/hf 缓存
-│   ├── calibration/                  # 标定用 PDB（1UBQ/1GFL/1CPS/1M17）
+/home/data/lrs/drug/drugagent/        # project root (persistent disk)
+├── env/                              # python env (py3.12, conda) [local]
+├── data/                             # [local]
+│   ├── libraries/                    # small-molecule SDF / VHH library fasta
+│   ├── weights/                      # ESMFold/ESM2 weights, torch/hf caches
+│   ├── calibration/                  # calibration PDBs (1UBQ/1GFL/1CPS/1M17)
 │   └── tools/
-│       ├── gromacs/                  # GROMACS 2023.1 (自编译, amber99sb-ildn)
+│       ├── gromacs/                  # GROMACS 2023.1 (self-built, amber99sb-ildn)
 │       ├── vina/                     # autodock-vina
 │       ├── gnina/                    # GNINA 1.3.1 ELF (CPU)
-│       ├── RFdiffusion/              # RFdiffusion (hydra) + models/ 权重 + mpnn/
-│       ├── vhh_scaffolds/            # 1EWN scaffold + secstruc 邻接 + NOTE.md
+│       ├── RFdiffusion/              # RFdiffusion (hydra) + models/ weights + mpnn/
+│       ├── vhh_scaffolds/            # 1EWN scaffold + secstruc adjacency + NOTE.md
 │       └── 3Dmol/                    # 3Dmol-min.js
-├── drugagent/                        # 主包
-│   ├── agent/                        # 2.0 核心: loop/提示词/41 个工具
-│   ├── vendor/openfold/              # aqlaboratory/openfold + CPU 补丁
-│   ├── modules/                      # A-E 五个模块（工具后端）
-│   ├── graph.py                      # 1.0 LangGraph 状态机（兜底工具复用）
+├── drugagent/                        # main package
+│   ├── agent/                        # 2.0 core: loop/prompts/41 tools
+│   ├── vendor/openfold/              # aqlaboratory/openfold + CPU patches
+│   ├── modules/                      # modules A–E (tool backends)
+│   ├── graph.py                      # 1.0 LangGraph state machine (fallback reuse)
 │   ├── cli.py                        # typer CLI (run/resume/rerun/status/report/setup)
-│   └── report/                       # 交互式 HTML + PDF (WeasyPrint)
-├── TUTORIAL.md                       # 使用教程（零基础）
-├── DESIGN.md                         # 2.0 架构设计
-├── HANDOFF.md                        # 环境与坑、当前状态、验证命令
-├── ROUNDLOG.md                       # 迭代日志（每轮 计划/结果/反思）
-├── projects/                         # 每次运行一个目录 (01_target…05_md, reports/, agent/) [本地]
-├── tests/                            # pytest 套件 (218 快测 + 15 slow e2e) [本地, 未入仓库]
-└── logs/                             # 构建/运行日志 [本地]
+│   └── report/                       # interactive HTML + PDF (WeasyPrint)
+├── TUTORIAL.md                       # user tutorial (zero background)
+├── DESIGN.md                         # 2.0 architecture design (zh)
+├── HANDOFF.md                        # environment & pitfalls, current state (zh)
+├── ROUNDLOG.md                       # iteration log, per-round plan/results/reflection (zh)
+├── projects/                         # one directory per run (01_target…05_md, reports/, agent/) [local]
+├── tests/                            # pytest suite (218 fast + 15 slow e2e) [local, not in repo]
+└── logs/                             # build/run logs [local]
 ```
 
-## 运行状态与断点
+## Status, Breakpoints & Reruns
 
-- `status`（R11 增强）：每个阶段的完成状态 + 关键数字（对接数/命中数/
-  设计数/MD ns 与 final RMSD/库名含回退标注）、磁盘上的阶段 JSON 产物、
-  最近 3 条工具失败（state.errors + transcript 里 ok=false 的调用）、
-  transcript 最后一条；`decisions.json` 记录每个判断与依据。
-- `resume --project DIR`：重放 `agent/transcript.jsonl`，从断点继续
-  （产物幂等 + 阶段级复用，R11/G8）。
-- `rerun --project DIR --stage X`：强制重跑单个阶段（G8；其余产物不动）。
-- 报告：`projects/<项目>/reports/report.html`（Plotly 交互图 + 3Dmol 结构）
-  与 `report.pdf`。
+- `status` (R11-enhanced): per-stage completion + key numbers
+  (docking count / hit count / design count / MD ns & final RMSD / library
+  name with fallback annotation), stage JSON artifacts on disk, the last 3
+  tool failures (state.errors + ok=false calls in the transcript), last
+  transcript entry; `decisions.json` records every judgment with rationale.
+- `resume --project DIR`: replays `agent/transcript.jsonl` and continues
+  from the breakpoint (artifact idempotency + stage-level reuse, R11/G8).
+- `rerun --project DIR --stage X`: force-reruns a single stage (G8; other
+  artifacts untouched).
+- Reports: `projects/<project>/reports/report.html` (Plotly interactive
+  charts + 3Dmol structures) and `report.pdf`.
 
-## 测试
+## Tests
 
-> `tests/` 目录（本地开发用，未随仓库发布；`env/`、`data/`、`projects/`
-> 同属本地部署，重建方式见 [TUTORIAL.md](TUTORIAL.md) §1 与 HANDOFF.md）。
+> The `tests/` directory is for local development (not published with the
+> repo; `env/`, `data/`, `projects/` are likewise local deployment — see
+> [TUTORIAL.md](TUTORIAL.md) §1 and HANDOFF.md for how to rebuild).
 
 ```bash
-env/bin/python -m pytest tests/ -m "not slow" -q --basetemp=$PWD/data/fixtures/_ptmp   # 快速单测 (218 用例)
-env/bin/python -m pytest tests/ -q --basetemp=$PWD/data/fixtures/_ptmp                  # 含 slow（需 vina/GROMACS/RF 权重）
+env/bin/python -m pytest tests/ -m "not slow" -q --basetemp=$PWD/data/fixtures/_ptmp   # fast unit tests (218 cases)
+env/bin/python -m pytest tests/ -q --basetemp=$PWD/data/fixtures/_ptmp                  # incl. slow (needs vina/GROMACS/RF weights)
 ```
 
-> slow 构建 e2e 在本机 /tmp（tmpfs）上偶发失败：有后台清理进程会在
-> gromacs 运行中删掉 pytest 的 tmp 目录。代码本身稳定，遇到偶发失败用
-> 上面 `--basetemp` 指向本地盘重跑即可。
+> Slow e2e builds intermittently fail on this machine's /tmp (tmpfs): a
+> background cleaner removes pytest's tmp directory while gromacs is
+> running. The code itself is stable — on a flaky failure, rerun with the
+> `--basetemp` above pointing at a local disk.
 
-## 1HVI 全模块端到端（参考）
+## 1HVI Full-Module End-to-End (reference)
 
 ```bash
 env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast --auto
 ```
 
-在 64 核 CPU 上约 3–5 h 完成全模块：靶点（1HVI 二聚体，99 残基/单体）→
-小分子筛选（标准化 + Vina 对接 + GNINA 复打分 + agent 定命中）→
-binder 设计（RFdiffusion 从头 + ESMFold 复合物打分）→ VHH 双轨 →
-体系选择（agent）→ GROMACS EM + 5 ns×3 副本 MD →
-RMSD/RMSF/Rg 分析 + HTML/PDF 报告。完整实例见 `projects/r10_e2e/`
-（含 5 个结构域的铰链信号分析）。
+On a 64-core CPU this completes all modules in ~3–5 h: target (1HVI dimer,
+99 residues/monomer) → small-molecule screening (standardization + Vina
+docking + GNINA rescoring + agent hit decision) → binder design (RFdiffusion
+de novo + ESMFold complex scoring) → VHH dual track → system selection
+(agent) → GROMACS EM + 5 ns × 3-replica MD → RMSD/RMSF/Rg analysis +
+HTML/PDF reports. A complete instance: `projects/r10_e2e/` (includes
+hinge-signal analysis of 5 structural domains).
 
-## 已知注意事项（摘要）
+## Known Caveats (summary)
 
-完整细节见 HANDOFF.md / ROUNDLOG.md 对应轮次；此处只列与使用相关的。
+Full details: HANDOFF.md / the corresponding round in ROUNDLOG.md (both in
+Chinese); here only what matters to users.
 
-- **单位**：GROMACS 的 rms/gyrate 输出为 nm（rmsf 为 Å，cluster 截断 1.5 为 nm）；
-  报告展示时 RMSD 已换算为 Å（×10），Rg 保持 nm。MD 分析链路已统一 nm 口径
-  （R15 修复过一处 Å→nm 全链路 ×10 bug，有回归测试）。
-- **紧凑盒子 PBC**：gmx 分析前自动 compact-unwrap（R17；蛋白接近盒尺寸时
-  wrapped 坐标跨盒断裂会制造 RMSD 假突刺，GROMACS 论坛同款案例）。
-- **辅因子/血红素**：MD 自动拆链 + ACPYPE/Gasteiger + 嵌入金属独立离子；
-  已知近似：GAFF2/Gasteiger 电荷（无 sqm/AM1-BCC），嵌入金属无配位约束
-  （长 MD 可能漂出平面）。
-- **MD 金属离子**：单原子金属残基（ZN/FE/MN/NI/CU/CO/MG/CA）自动并入所属
-  链 + 晶体配位距离约束（平坦底部势）；v1 局限：+2 电荷一刀切、软约束。
-- **MD 核酸**：DNA/RNA 链原生参数化（amber99sb-ildn）；单残基核苷酸
-  （NAD/ATP/FAD 等）走 ACPYPE 配体路径。
-- **MD 平衡/收敛**：NVT 50 ps + NPT 100 ps（位置约束，C-rescale——本构建
-  下 Berendsen 生产段 ~20 ps 会 SIGSEGV）；生产后收敛判定（RMSD 平台 +
-  主导簇 ≥50%），未收敛自动延长（默认最多 2 轮）。
-- **VHH 对接**：默认刚性 + CDR 片段（fast）——全长 VHH 是"巨型配体"
-  （773 原子 ~100 min，成本 ~O(n^1.9)）；片段自适应盒子消除撞墙罚分
-  （2.3e7 → 145 kcal/mol）。对接分是粗筛，非亲和力测定。
-- **pLDDT 口径**：VHH 文库 pLDDT 因 CDR3 无序集中在 30-35（门槛 fast 35/
-  full 50 因此标定）；binder/VHH 设计 pLDDT 是 ESMFold 重折叠置信度，
-  de novo 偏低属正常；几何接口度量（min 距离/接触对）是位姿级判别。
-- **scaffold 内容**：`vhh_scaffolds/` 的 1EWN 实为人 AAG 糖基化酶核心
-  （目录名 `vhh_` 是历史前缀）；scaffold-guided 只条件 SS+邻接，设计骨架
-  对 scaffold 漂移 15 Å 量级是预期（`scaffold_rmsd_a` 字段量化）。
-  详见 `data/tools/vhh_scaffolds/NOTE.md`。
-- **小分子库回退**：dtp/pdbbind 镜像不稳（实测 404/138 字节坏 tarball），
-  缺失或 <1MB 自动回退 chembl35_small（50k），state 与报告标明 fallback。
-- **结构坑预检**：`analyze_pdb` 扫多 MODEL/altloc/缺失残基/金属/核酸/无序区
-  并给建议 action；`run_target_prep` 自动修两个安全项，其余交 agent 判断
-  （decisions 留痕），报告第 1 节展示全部发现与修复。
-- **修饰残基（R17）**：靶点"配体"全是修饰残基（CPM 交叉链接/金属/辅因子，
-  64 名集合）时 MD 自动偏好 apo 通路（残基过滤后跑纯蛋白）；GFP 色原体
-  CRO 类（骨架原子缺失）仍需残基级修复（R18 缺口）。
-- **刚性漏斗局限**：默认对接/设计基于单一刚性构象，柔性只在 MD 阶段采样；
-  报告第 5 节的"柔性解读"会自动区分"整体漂移=构象采样/域运动"与
-  "局部去折叠"（分链自拟合 + 二级结构 + RMSF + 聚类 + 域 vs-rest）。
-- **磁盘**：环境+权重+库约 40 GB；MD 轨迹按 ns 增长（5 ns×3 副本约 2 GB）。
-- **GPU**：可选。无 `/dev/nvidia*` 时全部 CPU 运行（64 核足够）。
-- **GNINA**：ELF 二进制依赖 `env/lib/python3.12/site-packages/nvidia/*/lib`
-  （脚本已自动处理 LD_LIBRARY_PATH）。
-- **binder 序列来源**：RF 设计 PDB 残基名为 GLY（不写序列），内置
-  ProteinMPNN 生成真实序列（MPNN 缺失/失败回退启发式，报告标注）；
-  ESMFold 打分用真实序列。
-
-## 缺口清单（R18 候选，完整讨论见 ROUNDLOG 第 17 轮反思）
-
-- **后台标定收口**：crambin（第二刚性点）/ CDK2（柔性参照）MD 完成后
-  进标定表；r10_e2e 自动延长（二聚体相对运动 5 ns 未平台）完成后确认。
-- **收敛判据与 unwrap 耦合**：用链自拟合（而非整体 RMSD）判"内部柔性
-  漂移 vs 寡聚体相对运动"。
-- **GFP/CRO 类修饰残基**：残基级修复（补缺骨架 O 或删受影响残基）。
-- **二价抗衡离子**：genion 只支持 Na/Cl，Mg2+/Ca2+ 作抗衡离子无法定量
-  （`md_salt_m` 只算单价摩尔数）。
-- **嵌入辅因子金属无协调约束**（HEM 的 Fe2+，GROMACS 无原生支持）。
-- **构象选择价值验证**：需晶体结合模式与 MD 代表口袋明显失配的配体。
-- **生产段幂等键不含 eq 状态**（平衡重跑后生产 tpr 盒子可能与新 eq gro
-  不一致）。
+- **Units**: GROMACS rms/gyrate output is nm (rmsf in Å, cluster cutoff 1.5
+  in nm); the report displays RMSD converted to Å (×10), Rg in nm. The MD
+  analysis chain is now unified on nm (R15 fixed an Å→nm bug that inflated
+  every domain RMSD by ×10; regression-tested).
+- **Tight-box PBC**: gmx analysis auto-runs compact-unwrap first (R17;
+  when the protein nearly fills the box, wrapped coordinates break across
+  box faces and create fake RMSD spikes — the classic case from the GROMACS
+  forums).
+- **Cofactors/heme**: MD auto-splits chains + ACPYPE/Gasteiger + embedded
+  metals as standalone ions; known approximations: GAFF2/Gasteiger charges
+  (no sqm/AM1-BCC), embedded metals have no coordination restraints (may
+  drift out of plane in long MD).
+- **MD metal ions**: single-atom metal residues (ZN/FE/MN/NI/CU/CO/MG/CA)
+  are merged into the owning chain + crystal coordination distance
+  restraints (flat-bottom potential); v1 limitations: +2 charge for all
+  metals, soft restraints.
+- **MD nucleic acids**: DNA/RNA chains are natively parametrized
+  (amber99sb-ildn); single-residue nucleotides (NAD/ATP/FAD, etc.) go
+  through the ACPYPE ligand path.
+- **MD equilibration/convergence**: NVT 50 ps + NPT 100 ps (position
+  restraints, C-rescale — with this build, Berendsen SIGSEGVs the
+  production stage around 20 ps); after production, a convergence check
+  (RMSD plateau + dominant cluster ≥ 50%), auto-extension if not converged
+  (max 2 rounds by default).
+- **VHH docking**: rigid + CDR fragments by default (fast) — a full-length
+  VHH is a "giant ligand" (773 atoms ~100 min, cost ~O(n^1.9));
+  per-fragment adaptive boxes eliminate wall-collision penalties
+  (2.3e7 → 145 kcal/mol). Docking scores are coarse screening, not
+  measured affinity.
+- **pLDDT semantics**: VHH library pLDDT clusters at 30–35 because of
+  CDR3 disorder (thresholds fast 35 / full 50 were calibrated to that);
+  binder/VHH design pLDDT is ESMFold refolding confidence — low values are
+  normal for de novo designs; geometric interface metrics (min distance /
+  contact pairs) are the pose-level discriminator.
+- **Scaffold content**: the 1EWN scaffold in `vhh_scaffolds/` is actually
+  human AAG glycosylase core (the `vhh_` directory name is a historical
+  prefix); scaffold-guided mode conditions only on SS + adjacency, so
+  ~15 Å design-vs-scaffold drift is expected (quantified in the
+  `scaffold_rmsd_a` field). See `data/tools/vhh_scaffolds/NOTE.md`.
+- **Small-molecule library fallback**: dtp/pdbbind mirrors are flaky
+  (measured 404 / 138-byte bad tarballs); missing or <1 MB auto-falls back
+  to chembl35_small (50k), annotated as "fallback for dtp" in state and
+  report.
+- **Structure-pitfall pre-check**: `analyze_pdb` scans multi-MODEL / altloc
+  / missing residues / metals / nucleic acids / disordered regions and
+  suggests actions; `run_target_prep` auto-fixes the two safe items, the
+  rest go to the agent's judgment (recorded in decisions); report §1 shows
+  all findings and repairs.
+- **Modified residues (R17)**: when the target's "ligands" are all modified
+  residues (CPM crosslinks / metals / cofactors, a 64-name set), MD
+  auto-prefers the apo path (drop the residues, run the clean protein);
+  GFP-chromophore-type CRO (missing backbone atoms) still needs
+  residue-level repair (R18 gap).
+- **Rigid-funnel limitation**: default docking/design uses a single rigid
+  conformation; flexibility is sampled only in the MD stage. The report's
+  §5 "flexibility interpretation" automatically distinguishes "global
+  drift = conformational sampling / domain motion" from "local
+  unfolding" (per-chain self-fit + secondary structure + RMSF + clustering
+  + domain vs-rest).
+- **Disk**: env + weights + libraries ~40 GB; MD trajectories grow with ns
+  (5 ns × 3 replicas ≈ 2 GB).
+- **GPU**: optional. Without `/dev/nvidia*`, everything runs on CPU
+  (64 cores are enough).
+- **GNINA**: the ELF binary depends on
+  `env/lib/python3.12/site-packages/nvidia/*/lib` (the scripts handle
+  LD_LIBRARY_PATH automatically).
+- **Binder sequence source**: RF design PDBs carry GLY residue names
+  (no sequence); built-in ProteinMPNN generates real sequences (fallback
+  heuristic on MPNN failure, annotated in the report); ESMFold scoring
+  uses the real sequences.

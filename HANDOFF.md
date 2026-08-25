@@ -226,6 +226,16 @@ r10_e2e 延长 + rigid_crambin + flex_cdk2 三个作业运行中（收口见 R18
    盒下不等价（rep2 0.984 vs 0.130 nm）；两类指标并列展示时报告需注明
    展开策略差异。
 
+其他已知缺口（R8-R10 遗留，不紧急）：
+- **二价抗衡离子**：genion 只支持 Na/Cl，Mg2+/Ca2+ 作抗衡离子（非结构
+  金属）无法定量生成（`md_salt_m` 只算单价摩尔数）。
+- **嵌入辅因子金属无协调约束**：HEM 的 Fe2+ 在 MD 中无 coordination
+  restraints（GROMACS 无原生支持）；standalone ion 通道（R9）同样无约束。
+- **构象选择价值验证**：需找晶体结合模式与 MD 代表口袋明显失配的配体，
+  证明池化 docking 的 consensus 提升。
+- **生产段幂等键不含 eq 状态**：平衡重跑（MDP 指纹变化）后生产 tpr 的
+  盒子可能与新 eq gro 不一致；修：生产幂等键加入 eq_npt.gro 的哈希。
+
 ## 验证命令
 ```
 env/bin/python -m pytest tests/ -m "not slow" -q --basetemp=$PWD/data/fixtures/_ptmp
