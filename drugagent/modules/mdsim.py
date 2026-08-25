@@ -104,6 +104,23 @@ def select_system(state: dict, brain: AgentBrain | None) -> dict:
             "label": "apo 靶点（无配体，蛋白单独 MD — 柔性/铰链基线）",
             "ligand": False,
         })
+    # R17/P3: targets whose only "ligands" are modified residues
+    # (crosslinks like 1CPS CPM, chromophores, metals/cofactors) are
+    # really modified proteins — default to the apo system instead of
+    # trying to acpype-parameterise the residue. An explicit
+    # --md-system input_ligand still forces the complex.
+    ligres = [r.upper() for r in prep.get("ligand_resnames") or []]
+    if ligres and all(r in _MODIFIED_RES for r in ligres):
+        apo = next((c for c in choices if c["name"] == "apo"), None)
+        if apo is None:
+            apo = {
+                "name": "apo",
+                "label": "apo 靶点（修饰残基归蛋白，蛋白单独 MD）",
+                "ligand": False,
+            }
+        else:
+            choices.remove(apo)
+        choices.insert(0, apo)
     if not choices:
         raise RuntimeError("no MD system candidates; provide a complex PDB")
 
@@ -121,6 +138,62 @@ def select_system(state: dict, brain: AgentBrain | None) -> dict:
         choice = choices[0]
         choice["rationale"] = "默认选择（无 LLM/无用户指定）"
     return choice
+
+
+# R17/P3: residue names pdb2gmx parameterises natively — 20 standard
+# amino acids, common crystallographic variants/caps it also knows, and
+# DNA/RNA base codes. Anything else (crosslinks like 1CPS CPM, chromophores
+# like 1GFL CRO, metals, cofactors) is dropped for a clean apo protein
+# build; otherwise pdb2gmx dies on the modified residue.
+_STANDARD_AA = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS",
+    "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP",
+    "TYR", "VAL",
+    "ASH", "GLH", "HID", "HIE", "HIP", "TYP", "MSE", "ACE", "NME",
+}
+_STANDARD_NA = {
+    "DA", "DT", "DC", "GA", "CA", "CT", "TA", "TT",
+    "A", "G", "C", "T", "U",
+}
+
+# R17/P3: HETATM residue names that are (parts of) the protein itself or
+# non-drug cofactors/metals — not bound small-molecule ligands. When a
+# target's ligand set consists solely of these, the apo system is the
+# sensible MD default (the residue is dropped by _keep_standard_res).
+_MODIFIED_RES = {
+    # crosslinks / chromophores / modified residues
+    "CPM", "CRO", "SSX", "HED", "GLA", "HBA", "CSA", "CSB", "CSD",
+    "MSE", "TIR", "PYS", "SEI",
+    # common cofactors
+    "HEM", "HEM1", "HEM2", "HEC", "HCL", "SAH", "FAD", "FMN", "FME",
+    "NAD", "NAM", "NAP", "NCE", "GDP", "GTP", "ATP", "ADP", "AMP",
+    "CMP", "CTP", "UMP", "UTP", "PLP", "PYD",
+    # ions / buffers / water-like
+    "ZN", "FE", "FE2", "FE3", "MG", "MN", "CA", "NA", "K", "CL",
+    "CO", "NI", "CU", "CU2", "CD", "SE", "SO4", "PO4", "GLU", "PEG",
+    "EPE", "MGS", "ACT", "TYL", "DMS", "EGC", "PGE",
+}
+
+
+def _keep_standard_res(pdb: Path, out: Path) -> Path:
+    """R17/P3: filter a PDB down to native AA/NA residues (drops
+    crosslinks, chromophores, metals, cofactors, waters) and normalise
+    kept HETATM lines to ATOM so pdb2gmx sees a plain protein."""
+    keep = _STANDARD_AA | _STANDARD_NA
+    lines = []
+    with open(pdb) as fh:
+        for l in fh:
+            if l.startswith(("ATOM", "HETATM")):
+                if l[17:20].strip() not in keep:
+                    continue
+                if l.startswith("HETATM"):
+                    l = "ATOM  " + l[6:]
+            lines.append(l)
+    txt = "".join(lines)
+    if txt and not txt.rstrip().endswith("END"):
+        txt += "END\n"
+    out.write_text(txt)
+    return out
 
 
 def build_complex_pdb(state: dict, choice: dict, workdir: Path) -> Path:
@@ -196,7 +269,11 @@ def build_complex_pdb(state: dict, choice: dict, workdir: Path) -> Path:
         rec = workdir / "receptor_only.pdb"
         _remove_res(target_pdb, rec,
                     prep.get("ligand_resnames", []) + ["HOH", "WAT"])
-        out.write_text(_chain_lines(rec, None) + "END\n")
+        # R17/P3: modified residues (crosslinks/chromophores/metals)
+        # break pdb2gmx — keep only native AA/NA
+        rec_std = workdir / "receptor_standard.pdb"
+        _keep_standard_res(rec, rec_std)
+        out.write_text(_chain_lines(rec_std, None) + "END\n")
         return _fix_c_term(out)
     # protein-protein: prefer the ESMFold-refined design (chain B of the
     # scored complex) over the raw RFdiffusion output, which can contain
@@ -2739,6 +2816,38 @@ def interpret_stability(summary: dict) -> list[str]:
         notes.append(f"轻-中度构象漂移: 最终 RMSD {f * 10:.1f} Å (1.5-3.0 Å), 结合 RMSF/聚类判断是柔性还是去稳")
     else:
         notes.append(f"最终 RMSD 较大 ({f * 10:.1f} Å): 需结合下面指标区分柔性域运动/构象系综与局部去折叠")
+    # 1b) R17/P2: two-level rigidity verdict against the cross-target
+    # rigid baseline (R16/P4: ubiquitin 76-res monomer, 2 ns x 3 — a
+    # canonical stable protein — ends with core RMSD <= 0.21 nm and
+    # per-domain final_norm <= 0.08). A (near-)rigid body's RMSD grows
+    # ~sqrt(t), so the baseline scales with sqrt(ns_run / 2 ns).
+    ns_run = float(summary.get("ns_run") or 0.0)
+    rep_finals = [float(r["rmsd"][-1]) for r in summary.get("replicas", [])
+                  if r.get("rmsd")]
+    if ns_run > 0 and rep_finals and f is not None:
+        import math
+        base = 0.21 * math.sqrt(ns_run / 2.0)
+        worst = max(rep_finals)
+        if f <= base:
+            notes.append(
+                f"刚性基线对照 (R17/P2): 整体 RMSD 末端均值 {f * 10:.1f} Å ≤ 刚性"
+                f"参照上限 {base * 10:.1f} Å (泛素 76 残基单体 2 ns 末端 ≤2.1 Å, "
+                f"按 √t 折算到 {ns_run:g} ns; 最坏副本 {worst * 10:.1f} Å) — "
+                "整体处于刚性蛋白水平")
+        else:
+            notes.append(
+                f"刚性基线对照 (R17/P2): 整体 RMSD 末端均值 {f * 10:.1f} Å > 刚性"
+                f"参照上限 {base * 10:.1f} Å (泛素 2 ns ≤2.1 Å, √t 折算 {ns_run:g} "
+                f"ns; 最坏副本 {worst * 10:.1f} Å) — 超出刚性蛋白水平; 结合链自"
+                "拟合/域 vs-rest 区分内部柔性、寡聚体相对运动与去折叠")
+        max_norm = max((i.get("final_norm", 0.0)
+                        for i in (summary.get("domain_rmsd_vs_rest") or {}).values()
+                        if isinstance(i, dict)), default=0.0)
+        if max_norm > 0.08:
+            notes.append(
+                f"域级 final_norm 最大 {max_norm:.3f} > 刚性基线 0.08 (泛素 2 ns "
+                "0.04-0.08) — 存在超出刚性蛋白水平的真实域运动/铰链信号 "
+                "(刚性蛋白的域级 norm 不会超过该基线)")
     # 2) per-chain comparison (domain motion vs unfolding). Use the
     # self-fit (internal) RMSD: it is not inflated by reference-chain
     # flexibility or interface relaxation.
@@ -2918,6 +3027,35 @@ def _index_groups(tpr: Path, gmx: str, out_ndx: Path) -> set[str]:
     return _parse_group_list(out or "")
 
 
+def _ensure_unwrapped(tpr: Path, xtc: Path, gmx: str,
+                      log_file: Path) -> Path:
+    """R17/P1: return a compact-PBC-unwrapped copy of ``xtc`` (idempotent).
+
+    In the tight default box the protein nearly fills it, so in the raw
+    (wrapped) trajectory the protein is *broken* across the box boundary
+    once its centre drifts: atoms that are physically adjacent sit ~box
+    apart in wrapped coordinates. Any per-frame-fit tool (rms/rmsf/gyrate/
+    cluster) then fits a fragmented frame against a contiguous reference
+    and the RMSD is inflated (r10_e2e rep1: 2.083 nm "final" vs ~0.33 nm
+    unwrapped). ``trjconv -ur compact -pbc mol`` moves the whole compound
+    into one image so the per-frame fit sees a contiguous structure.
+    The constant image offset vs the tpr is absorbed by each frame's own
+    rot+trans fit, so the tpr remains a valid reference.
+
+    G8 idempotency: reuse the existing ``*_unwrapped.xtc`` when it is not
+    older than the source trajectory; re-unwrap only when the source is
+    newer (e.g. after an extension round merged into md_all.xtc).
+    """
+    unwrapped = xtc.with_name(xtc.stem + "_unwrapped.xtc")
+    if unwrapped.is_file() and \
+            unwrapped.stat().st_mtime >= xtc.stat().st_mtime:
+        return unwrapped
+    run_cmd([gmx, "trjconv", "-s", str(tpr), "-f", str(xtc),
+             "-ur", "compact", "-pbc", "mol", "-o", str(unwrapped)],
+            log_file=log_file, stdin="System\n")
+    return unwrapped
+
+
 def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
                      *, is_ligand: bool, save_ps: float = 10.0,
                      burn_in_ps: float = 0.0) -> dict:
@@ -2934,6 +3072,11 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
         # R6: prefer the merged (extended) trajectory when present
         merged = rdir / "md_all.xtc"
         xtc = merged if merged.is_file() else rdir / "md.xtc"
+        # R17/P1: all per-frame-fit gmx tools below run on the compact
+        # PBC-unwrapped trajectory (tight-box flapping otherwise inflates
+        # every series — see _ensure_unwrapped). Idempotent (G8).
+        xtc = _ensure_unwrapped(rdir / "md.tpr", xtc, gmx,
+                                rdir / "unwrapped.log")
         a = {"rep": r["rep"]}
         # system-aware fit/measure group: protein systems use Backbone,
         # DNA-only systems have no Backbone/Protein group (GROMACS builds
@@ -2993,6 +3136,9 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
         # parse
         t, y = _parse_xvg(anadir / f"rmsd_r{r['rep']}.xvg")
         a["rmsd"] = y
+        # R17/P2: production length (ns) for the interpretation's
+        # sqrt(t)-scaled rigid baseline
+        a["t_end_ns"] = float(t[-1]) / 1000.0 if t else 0.0
         t, y = _parse_xvg(anadir / f"rg_r{r['rep']}.xvg")
         a["rg"] = y
         t, y = _parse_xvg(anadir / f"rmsf_r{r['rep']}.xvg")
@@ -3083,6 +3229,9 @@ def analyze_replicas(replicas: list[dict], workdir: Path, env: dict,
                               if any(r.get("rmsf_profile") for r in per_rep) else []),
         "final_rmsd_mean": float(np.mean([r["rmsd"][-1] for r in per_rep if r.get("rmsd")])),
         "final_rg_mean": float(np.mean([r["rg"][-1] for r in per_rep if r.get("rg")])),
+        # R17/P2: production length (ns), max across replicas (merged
+        # trajectories can differ by extension rounding)
+        "ns_run": max((r.get("t_end_ns", 0.0) for r in per_rep), default=0.0),
         "ss_frac_mean": (np.mean(ss_mats, axis=0).tolist()
                          if ss_mats else []),
         "ss_stable_mean": (np.mean(ss_st_mats, axis=0).tolist()

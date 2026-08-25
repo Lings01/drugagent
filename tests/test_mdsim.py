@@ -1618,3 +1618,196 @@ def test_build_complex_apo(hivp_pdb, tmp_path):
     chains = {l[21] for l in txt.splitlines()
               if l.startswith(("ATOM", "HETATM"))}
     assert chains == {"A", "B"}, chains
+
+
+# --------------------------------------------------------------------------- #
+# R17/P1: gmx analysis on compact-unwrapped trajectories
+# --------------------------------------------------------------------------- #
+def _fake_gmx_runner(captured):
+    """run_cmd stand-in that records calls and writes the -o output file."""
+    import os
+    def fake(cmd, **kw):
+        captured.append(list(cmd))
+        if "-o" in cmd:
+            p = Path(cmd[cmd.index("-o") + 1])
+            os.makedirs(p.parent, exist_ok=True)
+            p.write_text("@x\n0 0.0\n1 0.1\n2 0.2\n")
+        return 0
+    return fake
+
+
+def test_ensure_unwrapped_idempotent(tmp_path, monkeypatch):
+    """R17/P1: _ensure_unwrapped runs trjconv once, then reuses the file;
+    a newer source trajectory triggers re-unwrap."""
+    captured = []
+    monkeypatch.setattr(md, "run_cmd", _fake_gmx_runner(captured))
+    tpr = tmp_path / "md.tpr"
+    tpr.write_text("tpr")
+    xtc = tmp_path / "md.xtc"
+    xtc.write_text("xtc")
+
+    out1 = md._ensure_unwrapped(tpr, xtc, "/bin/gmx",
+                                tmp_path / "unw.log")
+    assert out1.name == "md_unwrapped.xtc"
+    assert out1.is_file()
+    n = len(captured)
+    assert n >= 1 and captured[-1][1] == "trjconv"
+
+    # second call: no new trjconv (idempotent, G8)
+    out2 = md._ensure_unwrapped(tpr, xtc, "/bin/gmx",
+                                tmp_path / "unw.log")
+    assert out2 == out1
+    assert len(captured) == n
+
+    # source trajectory refreshed -> re-unwrap
+    xtc.write_text("xtc-v2")
+    import os
+    import time
+    fut = time.time() + 2
+    os.utime(xtc, (fut, fut))
+    out3 = md._ensure_unwrapped(tpr, xtc, "/bin/gmx",
+                                tmp_path / "unw.log")
+    assert out3 == out1
+    assert len(captured) == n + 1
+
+
+def test_analyze_replicas_uses_unwrapped(tmp_path, monkeypatch):
+    """R17/P1: every per-frame-fit gmx call (rms/rmsf/gyrate/cluster) in
+    analyze_replicas must run on the compact-unwrapped trajectory, not the
+    raw wrapped xtc (tight-box flapping otherwise inflates the series)."""
+    captured = []
+    monkeypatch.setattr(md, "run_cmd", _fake_gmx_runner(captured))
+    monkeypatch.setattr(md, "_index_groups",
+                        lambda *a, **k: {"Backbone", "Protein"})
+    monkeypatch.setattr(md, "build_chain_index", lambda *a, **k: [])
+
+    rdir = tmp_path / "05_md" / "md_rep1"
+    rdir.mkdir(parents=True)
+    (rdir / "md.tpr").write_text("tpr")
+    (rdir / "md.xtc").write_text("xtc")
+
+    md.analyze_replicas([{"rep": 1, "dir": str(rdir)}],
+                        tmp_path / "05_md", {"gmx": "/bin/gmx"},
+                        is_ligand=False)
+    frame_calls = [c for c in captured if c[1] in ("rms", "rmsf", "gyrate",
+                                                   "cluster")]
+    assert frame_calls, "no per-frame gmx calls captured"
+    for c in frame_calls:
+        f = c[c.index("-f") + 1]
+        assert f.endswith("md_unwrapped.xtc"), f"call on wrapped xtc: {c}"
+
+
+def test_keep_standard_res_drops_modified(tmp_path):
+    """R17/P3: _keep_standard_res keeps native AA/NA (incl. pdb2gmx-known
+    variants like MSE/HID), drops crosslinks/chromophores/cofactors/waters,
+    and normalises kept HETATM lines to ATOM."""
+    lines = [
+        "ATOM      1  N   ALA A   1    "
+        "   1.000   2.000   3.000  1.00  0.00           N",
+        "HETATM  100  SG  CPM A   5    "
+        "   5.000   6.000   7.000  1.00  0.00           S",
+        "HETATM  200  CK1 CRO A  66    "
+        "   8.000   9.000  10.000  1.00  0.00           C",
+        "HETATM  300  O   HOH A 999    "
+        "  11.000  12.000  13.000  1.00  0.00           O",
+        "ATOM    400  CA  MSE A  10    "
+        "  14.000  15.000  16.000  1.00  0.00           C",
+        "ATOM    500  NE2 HID A  20    "
+        "  17.000  18.000  19.000  1.00  0.00           N",
+        "ATOM    600  P   DA  A 100    "
+        "  20.000  21.000  22.000  1.00  0.00           P",
+    ]
+    src = tmp_path / "in.pdb"
+    src.write_text("\n".join(lines) + "END\n")
+    out = tmp_path / "out.pdb"
+    md._keep_standard_res(src, out)
+    txt = out.read_text()
+    res = [l[17:20].strip() for l in txt.splitlines()
+           if l.startswith(("ATOM", "HETATM"))]
+    assert set(res) == {"ALA", "MSE", "HID", "DA"}, res
+    assert "HETATM" not in txt, "kept lines must be normalised to ATOM"
+
+
+def test_build_complex_apo_drops_modified(hivp_pdb, tmp_path):
+    """R17/P3: the apo complex must survive pdb2gmx for modified-residue
+    targets — crambin-style crosslinks (CPM) and waters are dropped while
+    native chains keep their labels."""
+    from drugagent.modules.target_prep import _remove_res
+    rec = tmp_path / "apo.pdb"
+    _remove_res(hivp_pdb, rec, ["A77"])
+    # inject a fake crosslink residue (like 1CPS CPM)
+    extra = ("HETATM  9000  SG  CPM A  50    "
+             "   5.000   6.000   7.000  1.00  0.00           S\n")
+    rec.write_text(rec.read_text().replace("END\n", extra + "END\n"))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state = {"project_dir": str(proj),
+             "target_prep": {"clean_pdb": str(rec),
+                             "ligand_pdbqt": None,
+                             "ligand_resnames": []}}
+    out = md.build_complex_pdb(state, {"name": "apo", "ligand": False},
+                               tmp_path / "w")
+    txt = out.read_text()
+    assert "CPM" not in txt
+    chains = {l[21] for l in txt.splitlines()
+              if l.startswith(("ATOM", "HETATM"))}
+    assert chains == {"A", "B"}, chains
+
+
+def test_select_system_modified_res_prefers_apo(hivp_pdb, tmp_path):
+    """R17/P3: targets whose only 'ligands' are modified residues
+    (crosslinks/chromophores/metals, e.g. crambin CPM+ZN) default to the
+    apo system — the modified residue is part of the protein, not a
+    bound ligand to parameterise with acpype."""
+    from drugagent.modules.target_prep import _remove_res
+    rec = tmp_path / "crambin_like.pdb"
+    _remove_res(hivp_pdb, rec, ["A77"])
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    pdbqt = tmp_path / "lig.pdbqt"
+    pdbqt.write_text("stub")
+    state = {"project_dir": str(proj),
+             "target_prep": {"clean_pdb": str(rec),
+                             "ligand_pdbqt": str(pdbqt),
+                             "ligand_resnames": ["CPM", "ZN"]},
+             "options": {"no_llm": True}}
+    choice = md.select_system(state, None)
+    assert choice["name"] == "apo", choice
+
+    # a real small-molecule ligand (not a modified residue) keeps the
+    # input_ligand default
+    state["target_prep"]["ligand_resnames"] = ["A77"]
+    choice = md.select_system(state, None)
+    assert choice["name"] == "input_ligand", choice
+
+
+def test_interpret_rigid_baseline_note():
+    """R17/P2: the interpretation cites the cross-target rigid baseline
+    (ubiquitin 2 ns: core RMSD <= 2.1 A, domain final_norm <= 0.08),
+    sqrt(t)-scaled to the run length, and flags domain norms above the
+    rigid baseline as genuine hinge/domain motion."""
+    def _mk(mean_f, ns, finals, norms):
+        return {
+            "final_rmsd_mean": mean_f,
+            "ns_run": ns,
+            "replicas": [{"rmsd": [0.0, v]} for v in finals],
+            "domain_rmsd_vs_rest":
+                {f"dom{i}": {"final_norm": v, "mean_norm": v * 0.8,
+                             "final": v * 12.0, "mean": v * 9.6}
+                 for i, v in enumerate(norms)},
+        }
+    # rigid-like (ubq 2 ns): within baseline, no domain-motion note
+    notes = md.interpret_stability(
+        _mk(0.154, 2.0, [0.208, 0.110, 0.154], [0.040, 0.063, 0.080, 0.049]))
+    text = " ".join(notes)
+    assert "刚性基线对照" in text
+    assert "整体处于刚性蛋白水平" in text
+    assert "真实域运动/铰链信号" not in text
+
+    # flexible-like (HIV-PR 5 ns corrected): exceeds baseline AND domain
+    # norm above 0.08
+    notes = md.interpret_stability(
+        _mk(0.543, 5.0, [0.328, 0.984, 0.317], [0.041, 0.094, 0.109, 0.045]))
+    text = " ".join(notes)
+    assert "超出刚性蛋白水平" in text
+    assert "真实域运动/铰链信号" in text

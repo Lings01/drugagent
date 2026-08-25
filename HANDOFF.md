@@ -1,16 +1,15 @@
-# DrugAgent 2.0 — 交接说明（第 16 轮结束）
+# DrugAgent 2.0 — 交接说明（第 17 轮结束）
 
 ## 一句话状态
-代码库处于"第 16 轮迭代完成"状态：**纯蛋白 apo MD 通路**（target_prep
-无配体崩溃修复 + select_system/build 的 apo 选项，ubq 1UBQ 2ns×3 首跑
-成功）、**scaffold 保真度守卫**（scaffold_rmsd_a 字段；真实设计对 1EWN
-骨架 15.08 Å 漂移——RF 官方文档确认 scaffold-guided 只条件 SS+邻接、
-允许序列/精细结构变化）、**单位哨兵测试**（MDA vs gmx self-fit 比值带
-[0.05,1.0]；过程中剥离三处 PBC/参考伪影）、**binder_rf_cautious**
-（与 vhh 对称）、**跨靶点刚性基线**（ubq：self-fit ≤0.21 nm 干净分开
-刚性/柔性；域级 final_norm 0.04-0.08 与 HIV-PR 0.041-0.109 重叠 →
-域级 norm 需先扣刚性基线）。快速测试 212/212 绿。已知未修：gmx 链级
-RMSD 用过期 tpr 作参考（rep1 "2.083" 应读 ~0.3）。
+代码库处于"第 17 轮迭代完成"状态：**gmx 分析 compact-unwrap 修复**
+（R16"过期 TPR"真相=MDA 单位假象 + 紧凑盒 wrapped flapping；analyze 全
+per-frame-fit 调用改跑展开轨迹，r10_e2e rep1 2.083→0.328，新画像=链
+内部刚性 0.05-0.14 nm + 二聚体相对运动 1.15-3.88 nm 主导；触发 R6 自动
+延长 3×5 ns 后台）、**刚性基线判据**（interpret 注 1b：泛素 2 ns ≤2.1 Å/
+norm ≤0.08 基线，√t 折算）、**修饰残基通路**（apo 构建去非标准残基 +
+select_system 修饰残基→apo 偏好；crambin/CDK2 标定 MD 后台启动）、
+**scaffold NOTE**（1EWN=人 AAG 非 VHH）。快速测试 218/218 绿。后台：
+r10_e2e 延长 + rigid_crambin + flex_cdk2 三个作业运行中（收口见 R18）。
 
 ## 关键路径
 - 项目根：`/home/data/lrs/drug/drugagent`（唯一可写持久盘；**/tmp 是 tmpfs
@@ -21,6 +20,26 @@ RMSD 用过期 tpr 作参考（rep1 "2.083" 应读 ~0.3）。
   （产物幂等复用：重跑同一 `--name` 会跳过已完成阶段产物）
 - 轮次记录：`ROUNDLOG.md`（每轮计划/结果/反思，下轮计划从"反思/下轮缺口"开始）
 - git 仓库已初始化（.gitignore 覆盖 env/data/projects/日志）
+
+## 第 17 轮已完成（见 ROUNDLOG 详情）
+1. **P1 gmx 分析 compact-unwrap（核心修复）**：`mdsim._ensure_unwrapped()`
+   （trjconv `-ur compact -pbc mol`，G8 幂等）；analyze_replicas 所有
+   per-frame-fit 调用（rms/rmsf/gyrate/cluster/链级 rms）改跑展开轨迹，
+   tpr 参考保留（每帧 fit 吸收盒向量偏移）。**真相**：R16"tpr 与 xtc f0
+   差 21 Å"是 MDA 读 xtc(Å)/tpr(nm) 单位假象，单位一致后 tpr==f0；真病
+   因是紧凑盒 wrapped 坐标跨盒断裂（GROMACS 论坛同款案例）。r10_e2e
+   重算 rep1 2.083→0.328 / rep2 0.289→0.984 / rep3 0.317→0.317。
+2. **P2 刚性基线判据**：interpret 注 1b——泛素（76 残基单体 2 ns×3）
+   整体 RMSD ≤0.21 nm、域级 final_norm ≤0.08 为刚性基线；√t 折算上限
+   0.21×√(ns/2)；域级 norm >0.08 判"真实域运动/铰链"。summary 加
+   `ns_run`。
+3. **P3 修饰残基**：`_keep_standard_res()`（20 AA+MSE/HID/ACE/NME+核酸，
+   HETATM→ATOM）进 apo 构建；`select_system` 修饰残基集合（64 名）全
+   中→apo 优先。crambin(1CPS,48aa) apo 2ns×3 + CDK2(1M17+AQ4) 2ns×2
+   后台启动（第二刚性点 + 柔性参照）。GFP CRO 仍需残基级修复。
+4. **P4 scaffold NOTE**：`data/tools/vhh_scaffolds/NOTE.md`（1EWN=人 AAG
+   糖基化酶核心非 VHH；scaffold-guided 语义；替换方法）。
+5. **e2e**：218/218 快测绿（+6）。r10_e2e 延长 3×5 ns 后台运行中。
 
 ## 第 16 轮已完成（见 ROUNDLOG 详情）
 1. **P0a 纯蛋白 target_prep**：无配体靶点 `lig_pdb` 未初始化 →
@@ -194,20 +213,18 @@ RMSD 用过期 tpr 作参考（rep1 "2.083" 应读 ~0.3）。
 - 编辑世界与 bash 世界可能不同 mount namespace（若"文件已存在/不存在"矛盾
   时以 bash 为准，用 python 脚本改文件最稳）
 
-## 下轮缺口优先级（R17，ROUNDLOG 第 16 轮"反思"有完整版）
-1. **过期 TPR 参考（最大未修 bug）**：gmx 链级 RMSD（rmsd_rN.xvg +
-   per-chain drift）以 md.tpr 为参考，tpr 是 2 ns 段产物、xtc 是延长
-   段轨迹（起点漂移 ~21 Å）→ rep1 "2.083" 应读 ~0.3。修复：分析前从
-   xtc 抽 frame 0 作参考，或延长前重新 grompp。
-2. **铰链判据升级**：整体 self-fit 末端（第 16 轮证明可分刚性/柔性）
-   并入 interpret 注 8/9，"整体+域级"两级判据；刚性基线（ubq）写进注释。
-3. **修饰残基 + 第二刚性参照**：pdb2gmx 对 CRO 类修饰残基处理（或换
-   无修饰残基刚性蛋白），补第二刚性点 + 已知铰链体系（无辅因子腺苷酸
-   激酶），标定扩成小矩阵。
-4. **scaffold 内容**：1EWN 是 AAG 非 VHH——换真 VHH scaffold 或改名
-   目录并文档化"fold 条件而非序列条件"。
-5. **展开策略一致性**：compact-com vs 逐原子 unwrap 在紧凑盒子下不等价
-   （gmx rep2 0.984 vs MDA 0.130 nm）；修过期 TPR 时评估统一 unwrap。
+## 下轮缺口优先级（R18，ROUNDLOG 第 17 轮"反思"有完整版）
+1. **收口后台作业**：crambin/CDK2 完成后提取 final_norm/self-fit 进标定表
+   （目标：刚性 ≥2 点 + 柔性 ≥2 点）；r10_e2e 延长 3×5 ns 完成后确认
+   收敛判据与报告。
+2. **收敛判据与 unwrap 的耦合**：R6 自动延长现基于修正后序列（更真实），
+   二聚体相对运动 5 ns 未平台 → 可能需 10-15 ns；考虑用链自拟合（而非
+   整体 RMSD）判"内部柔性漂移 vs 寡聚体相对运动"。
+3. **GFP/CRO 类修饰残基**：残基级修复（补缺骨架 O 或删受影响残基）才能
+   作第二刚性参照候选；或改用无修饰残基刚性蛋白。
+4. **unwrap 策略一致性**：compact-com（gmx 链）与逐原子（MDA 域）在紧凑
+   盒下不等价（rep2 0.984 vs 0.130 nm）；两类指标并列展示时报告需注明
+   展开策略差异。
 
 ## 验证命令
 ```
