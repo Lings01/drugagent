@@ -16,7 +16,7 @@ r10_e2e 延长 + rigid_crambin + flex_cdk2 三个作业运行中（收口见 R18
   且有后台清理进程，pytest 慢测务必 `--basetemp=$PWD/data/fixtures/_ptmp`**）
 - 环境：`env/bin/python`（py3.12 conda）；GROMACS 2023.1 在 `data/tools/gromacs`
 - 测试：`env/bin/python -m pytest tests/ -m "not slow" -q --basetemp=$PWD/data/fixtures/_ptmp`
-- e2e：`env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast --auto --no-llm --name r10_e2e`
+- e2e：`drugagent run --target 1HVI --modules all --fast --auto --no-llm --name r10_e2e`
   （产物幂等复用：重跑同一 `--name` 会跳过已完成阶段产物）
 - 轮次记录：`ROUNDLOG.md`（每轮计划/结果/反思，下轮计划从"反思/下轮缺口"开始）
 - git 仓库已初始化（.gitignore 覆盖 env/data/projects/日志）
@@ -212,6 +212,11 @@ r10_e2e 延长 + rigid_crambin + flex_cdk2 三个作业运行中（收口见 R18
   刚性见 bench.json。vina 静默运行（无进度输出，完成后才写结果）
 - 编辑世界与 bash 世界可能不同 mount namespace（若"文件已存在/不存在"矛盾
   时以 bash 为准，用 python 脚本改文件最稳）
+- **drugagent 命令（entry point）**：`env/bin/pip install -e . --no-deps`
+  （pyproject 已有 [project.scripts] drugagent=drugagent.cli:app）生成
+  env/bin/drugagent，软链 ~/.local/bin/drugagent 后任意目录可用；路径解析全部
+  走 config.ROOT（DRUGAGENT_ROOT 或候选表，第一候选即本项目根）与 CWD 无关；
+  --project 接受路径或裸项目名（_resolve_project）
 
 ## 下轮缺口优先级（R18，ROUNDLOG 第 17 轮"反思"有完整版）
 1. **收口后台作业**：crambin/CDK2 完成后提取 final_norm/self-fit 进标定表
@@ -239,6 +244,6 @@ r10_e2e 延长 + rigid_crambin + flex_cdk2 三个作业运行中（收口见 R18
 ## 验证命令
 ```
 env/bin/python -m pytest tests/ -m "not slow" -q --basetemp=$PWD/data/fixtures/_ptmp
-env/bin/python -m drugagent.cli status --project projects/r10_e2e
+drugagent status --project projects/r10_e2e
 ls projects/r10_e2e/reports/   # report.html / report.pdf
 ```

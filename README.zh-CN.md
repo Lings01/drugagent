@@ -41,19 +41,24 @@
 ```bash
 cd /home/data/lrs/drug/drugagent
 
+# 0) 安装 drugagent 命令（一次性；editable 安装改代码即时生效；
+#    软链进用户 PATH 后即可在任意目录直接 drugagent ...）
+env/bin/pip install -e . --no-deps
+ln -sf $PWD/env/bin/drugagent ~/.local/bin/drugagent
+
 # 1) 一键环境配置（幂等，可重复执行）
-env/bin/python -m drugagent.setup
+drugagent setup
 
 # 2) 快速端到端验证（1HVI 靶点，全模块，小规模，无人值守）
-env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast --auto
+drugagent run --target 1HVI --modules all --fast --auto
 
 # 3) 生产运行（检查点交互：批准/修改/中止）
-env/bin/python -m drugagent.cli run --target 1HVI --modules screen,binder,vhh,md
-env/bin/python -m drugagent.cli resume --project projects/<项目>
+drugagent run --target 1HVI --modules screen,binder,vhh,md
+drugagent resume --project projects/<项目>
 
 # 4) 状态 / 报告
-env/bin/python -m drugagent.cli status --project projects/<项目>
-env/bin/python -m drugagent.cli report --project projects/<项目>
+drugagent status --project projects/<项目>
+drugagent report --project projects/<项目>
 ```
 
 零基础用户请从 [TUTORIAL.zh-CN.md](TUTORIAL.zh-CN.md) 开始（含逐参数解释、报告读法、
@@ -158,7 +163,7 @@ env/bin/python -m pytest tests/ -q --basetemp=$PWD/data/fixtures/_ptmp          
 ## 1HVI 全模块端到端（参考）
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast --auto
+drugagent run --target 1HVI --modules all --fast --auto
 ```
 
 在 64 核 CPU 上约 3–5 h 完成全模块：靶点（1HVI 二聚体，99 残基/单体）→

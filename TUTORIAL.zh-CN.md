@@ -36,11 +36,16 @@ cd /home/data/lrs/drug/drugagent
 # ① python 环境（应该打印 3.12.x）
 env/bin/python --version
 
+# ①-b 安装 drugagent 命令（一次性；editable 安装——改代码即时生效；
+#     软链进用户 PATH 后，任意目录直接 drugagent ...）
+env/bin/pip install -e . --no-deps
+ln -sf $PWD/env/bin/drugagent ~/.local/bin/drugagent
+
 # ② （可选）本地 LLM 是否在线——只用 --no-llm 脚本模式则不需要
 curl -s -m 5 http://127.0.0.1:18080/v1/models | head -c 200
 
 # ③ 环境是否完整（幂等：缺什么补什么，已有跳过；首次部署必跑）
-env/bin/python -m drugagent.setup
+drugagent setup
 
 # ④ 代码健康检查（~2 分钟，应显示 218 passed）
 env/bin/python -m pytest tests/ -m "not slow" -q -p no:warnings --basetemp=$PWD/data/fixtures/_ptmp
@@ -59,7 +64,7 @@ env/bin/python -m pytest tests/ -m "not slow" -q -p no:warnings --basetemp=$PWD/
 ### 2.1 命令
 
 ```bash
-env/bin/python -m drugagent.cli run \
+drugagent run \
   --target 1HVI \
   --modules screen \
   --fast \
@@ -96,7 +101,7 @@ env/bin/python -m drugagent.cli run \
 ### 2.3 看进度
 
 ```bash
-env/bin/python -m drugagent.cli status --project projects/mydock
+drugagent status --project projects/mydock
 ```
 
 输出每个阶段的 ✓/✗ + 关键数字（对接数/命中数/库名含回退标注）+ 产物清单 +
@@ -156,7 +161,7 @@ projects/mydock/
 ### 4.1 命令
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules binder \
+drugagent run --target 1HVI --modules binder \
   --fast --auto --no-llm --name mybinder
 ```
 
@@ -189,7 +194,7 @@ env/bin/python -m drugagent.cli run --target 1HVI --modules binder \
 ## 5. VHH 纳米抗体（双轨）
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules vhh \
+drugagent run --target 1HVI --modules vhh \
   --fast --auto --no-llm --name myvhh
 ```
 
@@ -220,15 +225,15 @@ env/bin/python -m drugagent.cli run --target 1HVI --modules vhh \
 
 ```bash
 # 带配体的复合物（靶点自带配体或指定体系）
-env/bin/python -m drugagent.cli run --target 1HVI --modules md \
+drugagent run --target 1HVI --modules md \
   --fast --auto --no-llm --name mymd
 
 # 纯蛋白靶点（apo，蛋白单独 MD——柔性/铰链基线）
-env/bin/python -m drugagent.cli run --target data/calibration/1UBQ.pdb \
+drugagent run --target data/calibration/1UBQ.pdb \
   --modules md --fast --auto --no-llm --name myapo
 
 # 自定义时长/副本（去掉 --fast 后默认 100 ns×3；常用覆盖）
-env/bin/python -m drugagent.cli run --target 1HVI --modules md \
+drugagent run --target 1HVI --modules md \
   --md-ns 5 --md-reps 3 --auto --no-llm --name mymd5
 ```
 
@@ -287,17 +292,17 @@ env/bin/python -m drugagent.cli run --target 1HVI --modules md \
 
 ```bash
 # 状态（随时可跑）
-env/bin/python -m drugagent.cli status --project projects/mydock
+drugagent status --project projects/mydock
 
 # 断点续跑（崩溃/中断后；重放 transcript + 产物复用）
-env/bin/python -m drugagent.cli resume --project projects/mydock
+drugagent resume --project projects/mydock
 
 # 只强制重跑某个阶段（其余产物不动）
-env/bin/python -m drugagent.cli rerun --project projects/mydock --stage md
-env/bin/python -m drugagent.cli rerun --project projects/mydock --stage vhh --no-with-report
+drugagent rerun --project projects/mydock --stage md
+drugagent rerun --project projects/mydock --stage vhh --no-with-report
 
 # 只重新生成报告
-env/bin/python -m drugagent.cli report --project projects/mydock
+drugagent report --project projects/mydock
 ```
 
 常用 stage 名：`target_prep` / `screening` / `binder` / `vhh` / `md` /
@@ -313,7 +318,7 @@ env/bin/python -m drugagent.cli report --project projects/mydock
 默认（**不带** `--auto`）是交互模式：agent 在里程碑停下等你的输入。
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast
+drugagent run --target 1HVI --modules all --fast
 # 前台运行，会在这些点停下：
 #   [里程碑检查点: target]  靶点预检摘要 → 批准/修改/中止
 #   [里程碑检查点: screening]
@@ -388,7 +393,7 @@ binder 类型——都由 LLM 决定并留痕；`--no-llm` 模式用默认值。
 
 **Q2：报 "library dtp missing/corrupt (0 bytes)" 要紧吗？**
 不要紧，自动回退 chembl35_small（5 万化合物），state 和报告会标注
-`fallback for dtp`。想修库：`env/bin/python -m drugagent.setup --libraries dtp`
+`fallback for dtp`。想修库：`drugagent setup --libraries dtp`
 （dtpbase.org 镜像不稳时可试 `--libraries pdbbind`，软失败不打断 setup）。
 
 **Q3：跑一半断了/机器重启了？**

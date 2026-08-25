@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: drugagent
+Version: 0.1.0
+Summary: Drug discovery agent: target prep, screening, binder design, nanobody design, MD
+Requires-Python: >=3.10
+Requires-Dist: langgraph
+Requires-Dist: langchain-openai
+Requires-Dist: typer
+Requires-Dist: loguru
+Requires-Dist: requests
+Requires-Dist: joblib
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scipy
+Requires-Dist: scikit-learn
+Requires-Dist: rdkit
+Requires-Dist: biopython
+Requires-Dist: MDAnalysis
+Requires-Dist: plotly
+Requires-Dist: kaleido
+Requires-Dist: weasyprint
+Requires-Dist: mordred
+Requires-Dist: tqdm

@@ -61,6 +61,21 @@ def _project_dir(name: str | None) -> Path:
     return p
 
 
+def _resolve_project(v: str | None) -> Path | None:
+    """--project: an existing path (abs or rel to CWD), or a bare project
+    NAME resolved under PROJECTS — so `drugagent status --project rigid_ubq`
+    works from any working directory (installed entry-point usage)."""
+    if v is None:
+        return _latest_project()
+    p = Path(v)
+    if p.is_dir():
+        return p
+    cand = PROJECTS / v
+    if cand.is_dir():
+        return cand
+    return p  # does not exist; caller's error handling reports it
+
+
 def _load_state(project: Path) -> dict:
     """State from state.json (2.0), falling back to 1.0 layout."""
     st_path = project / "state.json"
@@ -243,7 +258,7 @@ def resume(
     from .agent.loop import scripted_run
     from .llm import AgentBrain
 
-    pdir = Path(project)
+    pdir = _resolve_project(project)
     state = _load_state(pdir)
     options = state.get("options", {})
     tinfo = state.get("target", {})
@@ -285,7 +300,7 @@ def rerun(project: str = typer.Option(None, help="项目目录 (默认最新)"),
           with_report: bool = typer.Option(True, help="阶段成功后重建报告")):
     """强制重跑单个阶段 (G8: force=true 绕过 stage 复用; 其余阶段产物不动)."""
     from .agent import Ctx, build_tools
-    pdir = Path(project) if project else _latest_project()
+    pdir = _resolve_project(project)
     if pdir is None:
         typer.echo("没有项目")
         raise typer.Exit(1)
@@ -369,7 +384,7 @@ def status(project: str = typer.Option(None, help="项目目录 (默认最新)")
     """查看运行状态 (阶段完成度 + 关键数字 + 产物 + 最近错误)."""
     from .agent.stages import status_lines
 
-    pdir = Path(project) if project else _latest_project()
+    pdir = _resolve_project(project)
     if pdir is None:
         typer.echo("没有项目")
         return
@@ -431,7 +446,7 @@ def _latest_project() -> Path | None:
 def report(project: str = typer.Option(..., help="项目目录")):
     """(重新)生成 HTML + PDF 报告."""
     from .report import report as report_mod
-    pdir = Path(project)
+    pdir = _resolve_project(project)
     state = _load_state(pdir)
     out = report_mod.build_report(state)
     typer.echo(f"HTML: {out['html']}")

@@ -45,19 +45,24 @@ disk ~40 GB (env + weights + libraries).
 ```bash
 cd /home/data/lrs/drug/drugagent
 
+# 0) Install the `drugagent` command (one-time; editable — code edits
+#    apply immediately; symlink puts it in your user PATH)
+env/bin/pip install -e . --no-deps
+ln -sf $PWD/env/bin/drugagent ~/.local/bin/drugagent
+
 # 1) One-shot environment setup (idempotent, re-runnable)
-env/bin/python -m drugagent.setup
+drugagent setup
 
 # 2) Fast end-to-end validation (1HVI target, all modules, small scale, unattended)
-env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast --auto
+drugagent run --target 1HVI --modules all --fast --auto
 
 # 3) Production run (interactive checkpoints: approve / modify / abort)
-env/bin/python -m drugagent.cli run --target 1HVI --modules screen,binder,vhh,md
-env/bin/python -m drugagent.cli resume --project projects/<project>
+drugagent run --target 1HVI --modules screen,binder,vhh,md
+drugagent resume --project projects/<project>
 
 # 4) Status / reports
-env/bin/python -m drugagent.cli status --project projects/<project>
-env/bin/python -m drugagent.cli report --project projects/<project>
+drugagent status --project projects/<project>
+drugagent report --project projects/<project>
 ```
 
 New users: start with [TUTORIAL.md](TUTORIAL.md) (per-parameter explanations,
@@ -178,7 +183,7 @@ env/bin/python -m pytest tests/ -q --basetemp=$PWD/data/fixtures/_ptmp          
 ## 1HVI Full-Module End-to-End (reference)
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast --auto
+drugagent run --target 1HVI --modules all --fast --auto
 ```
 
 On a 64-core CPU this completes all modules in ~3–5 h: target (1HVI dimer,

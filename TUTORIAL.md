@@ -43,11 +43,17 @@ cd /home/data/lrs/drug/drugagent
 # ① python environment (should print 3.12.x)
 env/bin/python --version
 
+# ①-b install the `drugagent` command (one-time; editable install — code
+#     edits apply immediately; the symlink puts it on your user PATH so you
+#     can call `drugagent ...` from ANY directory)
+env/bin/pip install -e . --no-deps
+ln -sf $PWD/env/bin/drugagent ~/.local/bin/drugagent
+
 # ② (optional) is the local LLM online — not needed if you only use --no-llm scripted mode
 curl -s -m 5 http://127.0.0.1:18080/v1/models | head -c 200
 
 # ③ environment completeness (idempotent: fills what's missing, skips what exists; must run on first deploy)
-env/bin/python -m drugagent.setup
+drugagent setup
 
 # ④ code health check (~2 min, should show 218 passed)
 env/bin/python -m pytest tests/ -m "not slow" -q -p no:warnings --basetemp=$PWD/data/fixtures/_ptmp
@@ -69,7 +75,7 @@ Notes:
 ### 2.1 The command
 
 ```bash
-env/bin/python -m drugagent.cli run \
+drugagent run \
   --target 1HVI \
   --modules screen \
   --fast \
@@ -113,7 +119,7 @@ Every parameter explained:
 ### 2.3 Watch progress
 
 ```bash
-env/bin/python -m drugagent.cli status --project projects/mydock
+drugagent status --project projects/mydock
 ```
 
 Output: per-stage ✓/✗ + key numbers (docking count / hit count / library
@@ -178,7 +184,7 @@ recompute with `rerun` (§7).
 ### 4.1 The command
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules binder \
+drugagent run --target 1HVI --modules binder \
   --fast --auto --no-llm --name mybinder
 ```
 
@@ -219,7 +225,7 @@ env/bin/python -m drugagent.cli run --target 1HVI --modules binder \
 ## 5. VHH Nanobody (dual track)
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules vhh \
+drugagent run --target 1HVI --modules vhh \
   --fast --auto --no-llm --name myvhh
 ```
 
@@ -256,15 +262,15 @@ Two tracks in parallel:
 
 ```bash
 # Ligand-bound complex (target with its ligand, or a specified system)
-env/bin/python -m drugagent.cli run --target 1HVI --modules md \
+drugagent run --target 1HVI --modules md \
   --fast --auto --no-llm --name mymd
 
 # Pure protein target (apo — protein alone: flexibility/hinge baseline)
-env/bin/python -m drugagent.cli run --target data/calibration/1UBQ.pdb \
+drugagent run --target data/calibration/1UBQ.pdb \
   --modules md --fast --auto --no-llm --name myapo
 
 # Custom length/replicas (without --fast the default is 100 ns×3; common override)
-env/bin/python -m drugagent.cli run --target 1HVI --modules md \
+drugagent run --target 1HVI --modules md \
   --md-ns 5 --md-reps 3 --auto --no-llm --name mymd5
 ```
 
@@ -333,17 +339,17 @@ analysis side trims a 100 ps burn-in by default).
 
 ```bash
 # status (run anytime)
-env/bin/python -m drugagent.cli status --project projects/mydock
+drugagent status --project projects/mydock
 
 # resume from a breakpoint (after crash/restart; replays transcript + artifact reuse)
-env/bin/python -m drugagent.cli resume --project projects/mydock
+drugagent resume --project projects/mydock
 
 # force-rerun one stage only (other artifacts untouched)
-env/bin/python -m drugagent.cli rerun --project projects/mydock --stage md
-env/bin/python -m drugagent.cli rerun --project projects/mydock --stage vhh --no-with-report
+drugagent rerun --project projects/mydock --stage md
+drugagent rerun --project projects/mydock --stage vhh --no-with-report
 
 # regenerate only the report
-env/bin/python -m drugagent.cli report --project projects/mydock
+drugagent report --project projects/mydock
 ```
 
 Common stage names: `target_prep` / `screening` / `binder` / `vhh` /
@@ -361,7 +367,7 @@ Default (i.e. **without** `--auto`) is interactive: the agent stops at
 milestones and waits for your input.
 
 ```bash
-env/bin/python -m drugagent.cli run --target 1HVI --modules all --fast
+drugagent run --target 1HVI --modules all --fast
 # runs in the foreground and stops at these points:
 #   [milestone checkpoint: target]    target pre-check summary → approve/modify/abort
 #   [milestone checkpoint: screening]
@@ -447,7 +453,7 @@ the LLM and recorded. `--no-llm` mode uses defaults.
 **Q2: I see "library dtp missing/corrupt (0 bytes)". Important?**
 No — it auto-falls back to chembl35_small (50k compounds), annotated as
 `fallback for dtp` in state and report. To repair the library:
-`env/bin/python -m drugagent.setup --libraries dtp` (the dtpbase.org
+`drugagent setup --libraries dtp` (the dtpbase.org
 mirror is flaky; `--libraries pdbbind` soft-fails without breaking setup).
 
 **Q3: It died halfway / the machine rebooted?**

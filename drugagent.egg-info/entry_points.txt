@@ -1,0 +1,2 @@
+[console_scripts]
+drugagent = drugagent.cli:app
